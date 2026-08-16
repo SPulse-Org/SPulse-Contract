@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, events::Event, token, vec, Address, BytesN,
+    Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -26,6 +26,25 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// Governance delay for contract upgrades (~1 day at 5s/ledger)
+const UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
+// ── Events ────────────────────────────────────────────────────────────────────
+// Upgrade announcements. (soroban-sdk 26.0.1 does not re-export the
+// #[contractevent] macro, so these implement soroban_sdk::events::Event.)
+
+struct GovernanceEvent(&'static str);
+
+impl soroban_sdk::events::Event for GovernanceEvent {
+    fn topics(&self, env: &Env) -> Vec<Val> {
+        vec![&env, Symbol::new(env, self.0).into_val(env)]
+    }
+
+    fn data(&self, env: &Env) -> Val {
+        ().into_val(env)
+    }
+}
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +72,8 @@ pub enum MarketError {
     NotAuthorized = 18,
     MarketNotCancelled = 19,
     RateLimitExceeded = 20,
+    NoPendingUpgrade = 22,
+    UpgradeNotReady = 23,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -72,6 +93,8 @@ pub enum DataKey {
     FeeRecipient(Address),
     HasReferrer(Address),
     RateWindow, // packed u64: high32=window_start_hi, low32=count
+    // ── Governance (issue #5) ─────────────────────────────────────────────
+    PendingUpgrade, // PendingUpgrade — instance
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -93,6 +116,15 @@ pub struct BetEntry {
     pub is_yes: bool,
     pub claimed: bool,
     pub count: u32, // how many times this user has bet on this market
+}
+
+// A proposed upgrade carries its proposal ledger sequence so execution can be
+// gated on the governance delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at: u32, // ledger sequence at proposal
 }
 
 // ── Domain Structs ────────────────────────────────────────────────────────────
@@ -155,7 +187,6 @@ impl PredictionMarketContract {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        // OPT: pack all 4 contract addresses into one slot
         env.storage().instance().set(
             &DataKey::Cfg,
             &Config {
@@ -172,18 +203,60 @@ impl PredictionMarketContract {
         Ok(())
     }
 
-    // ── Upgradeability & Config (admin only) ──────────────────────────────────
-    // Allows fixing a bad config (e.g. wrong XLM SAC) or shipping a bug fix
-    // without redeploying and losing all markets/bets/contract address.
+    // ── Governance: upgrades (admin + timelock) ──────────────────────────────
+    // Immediate `update_current_contract_wasm` is intentionally NOT available.
+    // Every upgrade must be PROPOSED, then EXECUTED after UPGRADE_DELAY_LEDGERS.
+    // Storage is preserved — only the executable changes.
 
-    /// Replace this contract's WASM bytecode in place. Admin only.
-    /// Storage is preserved — only the executable changes.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MarketError> {
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), MarketError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                wasm_hash: new_wasm_hash,
+                proposed_at: env.ledger().sequence(),
+            },
+        );
+        GovernanceEvent("upgrade_proposed").publish(&env);
         Ok(())
     }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(MarketError::NoPendingUpgrade)?;
+        if env.ledger().sequence().saturating_sub(pending.proposed_at) < UPGRADE_DELAY_LEDGERS {
+            return Err(MarketError::UpgradeNotReady);
+        }
+        // Clear the proposal BEFORE the WASM swap: replaying execute_upgrade
+        // in the same transaction context would otherwise double-apply.
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        GovernanceEvent("upgrade_executed").publish(&env);
+        env.deployer().update_current_contract_wasm(pending.wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Ok(())
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    // ── Config (dependency rotation) ─────────────────────────────────────
 
     /// Update the packed Config (token / referral / leaderboard / xlm_sac). Admin only.
     /// Used to correct an address set at initialize time.
@@ -287,7 +360,6 @@ impl PredictionMarketContract {
         admin.require_auth();
         Self::check_rate(&env)?;
 
-        // OPT: single instance read for count (was already one read)
         let market_id: u64 = env
             .storage()
             .instance()
@@ -316,7 +388,6 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
-        // OPT: removed BettorCount write here — now written lazily on first bet
         env.storage()
             .instance()
             .set(&DataKey::MarketCount, &market_id);
@@ -338,7 +409,6 @@ impl PredictionMarketContract {
             return Err(MarketError::BetTooSmall);
         }
 
-        // OPT: load market first — cheapest early-exit if not found
         let mut market = Self::load_market(&env, market_id)?;
         if market.cancelled {
             return Err(MarketError::MarketCancelled);
@@ -350,11 +420,9 @@ impl PredictionMarketContract {
             return Err(MarketError::MarketExpired);
         }
 
-        // OPT: single read for BetEntry (was 3 separate reads: Bet + BetGross + UserBetCount)
         let bet_key = DataKey::Bet(market_id, user.clone());
         let existing: Option<BetEntry> = env.storage().persistent().get(&bet_key);
 
-        // Spam guard + side check combined from single read
         if let Some(ref e) = existing {
             if e.count >= MAX_BETS_PER_USER {
                 return Err(MarketError::TooManyBets);
@@ -372,7 +440,6 @@ impl PredictionMarketContract {
         let referral_fee = total_fee - platform_fee;
         let net = amount * NET_NUMERATOR / BPS_DENOM;
 
-        // OPT: one Config read instead of 4 separate instance reads
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
 
         // ── XLM transfer user → this contract ────────────────────────────
@@ -448,7 +515,6 @@ impl PredictionMarketContract {
             let cnt_key = DataKey::BettorCount(market_id);
             let count: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0);
             let slot_key = DataKey::BettorAt(market_id, count);
-            // OPT: no clone — user is moved here and we don't need it after
             env.storage().persistent().set(&slot_key, &user);
             env.storage()
                 .persistent()
@@ -576,7 +642,6 @@ impl PredictionMarketContract {
             return Err(MarketError::MarketNotCancelled);
         }
 
-        // OPT: read BetEntry (which now contains gross) — was a separate BetGross key
         let bet_key = DataKey::Bet(market_id, user.clone());
         let mut entry: BetEntry = env
             .storage()
@@ -603,7 +668,6 @@ impl PredictionMarketContract {
     }
 
     // ── Claim ─────────────────────────────────────────────────────────────
-    // OPT: one Config read replaces 3 separate reads (xlm_sac, leaderboard, token)
 
     pub fn claim(env: Env, user: Address, market_id: u64) -> Result<(), MarketError> {
         user.require_auth();
@@ -716,7 +780,6 @@ impl PredictionMarketContract {
         Self::load_market(&env, market_id)
     }
 
-    // OPT: returns Bet (ABI-compatible) derived from BetEntry
     pub fn get_bet(env: Env, market_id: u64, user: Address) -> Result<Bet, MarketError> {
         let e: BetEntry = env
             .storage()
@@ -843,12 +906,8 @@ impl PredictionMarketContract {
         Err(MarketError::NotAuthorized)
     }
 
-    // OPT: CreationWindow packed into two u32s stored as separate u32 keys
-    // to avoid struct serialization. Actually simpler: store as (u64, u32) tuple
-    // via a single key — Soroban serializes tuples efficiently.
     fn check_rate(env: &Env) -> Result<(), MarketError> {
         let now = env.ledger().timestamp();
-        // (window_start, count) packed — 1 read instead of 1 struct deserialize
         let (ws, cnt): (u64, u32) = env
             .storage()
             .instance()
