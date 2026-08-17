@@ -417,3 +417,43 @@ fn test_allowance_expires() {
 
     assert_eq!(client.allowance(&owner, &spender), 0_i128);
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Issue #100 — hard supply cap enforces bounded minting economics
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_mint_enforces_supply_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    init(&env, &client);
+    let minter = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.set_minter(&minter);
+
+    // Mint everything except 1 PULSE.
+    let max = 1_000_000_000_0000000_i128;
+    client.mint(&minter, &user, &(max - 1_0000000));
+    assert_eq!(client.total_supply(), max - 1_0000000);
+    // A 1 PULSE mint exactly fills the cap.
+    client.mint(&minter, &user, &1_0000000);
+    assert_eq!(client.total_supply(), max);
+    // One more stroop over the cap must fail (SupplyCapExceeded).
+    client.mint(&minter, &user, &1);
+}
+
+#[test]
+fn test_supply_cap_partial_is_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    init(&env, &client);
+    let minter = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.set_minter(&minter);
+    client.mint(&minter, &user, &100_0000000_i128);
+    assert_eq!(client.total_supply(), 100_0000000_i128);
+    assert_eq!(client.balance(&user), 100_0000000_i128);
+}

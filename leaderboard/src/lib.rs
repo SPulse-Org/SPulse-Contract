@@ -1,14 +1,16 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal,
-    Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
 };
 
 const MAX_TOP_PLAYERS: u32 = 50;
-const MAX_PAGE_SIZE: u32 = 20;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// Issue #100 invariant matrix (compile-time).
+const _: () = assert!(MAX_TOP_PLAYERS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -293,8 +295,22 @@ impl LeaderboardContract {
                 }
             }
 
-            // Update min points/slot if this was the last slot.
-            if count > 0 {
+            // Issue #100: the min cache must track the REAL smallest entry.
+            // After an in-place update the changed entry landed at `current`;
+            // if it dropped below the cached min (it can now sit below the
+            // tail, leaving the list unsorted below it) it IS the new min.
+            // Only then is the tail (slot count-1) recomputed, which is the
+            // correct min whenever the updated entry rose instead.
+            let min_points: u64 = env.storage().instance().get(&DataKey::MinPoints).unwrap_or(0);
+            let updated: PlayerEntry = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TopPlayerAt(current))
+                .unwrap();
+            if updated.points < min_points {
+                env.storage().instance().set(&DataKey::MinPoints, &updated.points);
+                env.storage().instance().set(&DataKey::MinSlot, &current);
+            } else if count > 0 {
                 let min_slot = count - 1;
                 let min_entry: PlayerEntry = env
                     .storage()
