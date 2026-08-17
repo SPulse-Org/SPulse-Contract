@@ -1,8 +1,28 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String,
+    contract, contracterror, contractimpl, contracttype, events::Event, vec, Address, BytesN, Env,
+    IntoVal, String, Symbol, Val, Vec,
 };
+
+// Governance delay for contract upgrades (~1 day at 5s/ledger)
+const UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
+// ── Events ────────────────────────────────────────────────────────────────────
+// Upgrade announcements. (soroban-sdk 26.0.1 does not re-export the
+// #[contractevent] macro, so these implement soroban_sdk::events::Event.)
+
+struct GovernanceEvent(&'static str);
+
+impl soroban_sdk::events::Event for GovernanceEvent {
+    fn topics(&self, env: &Env) -> Vec<Val> {
+        vec![&env, Symbol::new(env, self.0).into_val(env)]
+    }
+
+    fn data(&self, env: &Env) -> Val {
+        ().into_val(env)
+    }
+}
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -14,6 +34,8 @@ pub enum TokenError {
     InsufficientBalance = 4,
     InvalidAmount = 5,
     NotAdmin = 6,
+    NoPendingUpgrade = 7,
+    UpgradeNotReady = 8,
 }
 
 #[contracttype]
@@ -26,6 +48,8 @@ pub enum DataKey {
     Name,
     Symbol,
     Decimals,
+    // ── Governance (issue #5) ─────────────────────────────────────────────
+    PendingUpgrade, // PendingUpgrade — instance
 }
 
 #[contract]
@@ -52,8 +76,16 @@ impl PULSETokenContract {
         Ok(())
     }
 
-    /// Replace this contract's WASM in place. Admin only. Balances preserved.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), TokenError> {
+    // ── Governance: upgrades (admin + timelock) ──────────────────────────────
+    // Immediate `update_current_contract_wasm` is intentionally NOT available.
+    // Every upgrade must be PROPOSED, then EXECUTED after UPGRADE_DELAY_LEDGERS.
+    // Balances are preserved — only the executable changes.
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), TokenError> {
         let stored: Address = env
             .storage()
             .instance()
@@ -63,8 +95,59 @@ impl PULSETokenContract {
             return Err(TokenError::NotAdmin);
         }
         admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                wasm_hash: new_wasm_hash,
+                proposed_at: env.ledger().sequence(),
+            },
+        );
+        GovernanceEvent("upgrade_proposed").publish(&env);
         Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), TokenError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TokenError::NotInitialized)?;
+        if admin != stored {
+            return Err(TokenError::NotAdmin);
+        }
+        admin.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(TokenError::NoPendingUpgrade)?;
+        if env.ledger().sequence().saturating_sub(pending.proposed_at) < UPGRADE_DELAY_LEDGERS {
+            return Err(TokenError::UpgradeNotReady);
+        }
+        // Clear the proposal BEFORE the WASM swap: replaying execute_upgrade
+        // in the same transaction context would otherwise double-apply.
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        GovernanceEvent("upgrade_executed").publish(&env);
+        env.deployer().update_current_contract_wasm(pending.wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), TokenError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TokenError::NotInitialized)?;
+        if admin != stored {
+            return Err(TokenError::NotAdmin);
+        }
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Ok(())
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     pub fn set_minter(env: Env, minter: Address) -> Result<(), TokenError> {
@@ -196,6 +279,15 @@ impl PULSETokenContract {
             .get(&DataKey::Admin)
             .ok_or(TokenError::NotInitialized)
     }
+}
+
+// A proposed upgrade carries its proposal ledger sequence so execution can be
+// gated on the governance delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at: u32, // ledger sequence at proposal
 }
 
 #[cfg(test)]

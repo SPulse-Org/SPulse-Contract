@@ -1,14 +1,33 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal,
-    Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, events::Event, vec, Address, BytesN, Env,
+    IntoVal, Symbol, Val, Vec,
 };
 
 const MAX_TOP_PLAYERS: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 20;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// Governance delay for contract upgrades (~1 day at 5s/ledger)
+const UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
+// ── Events ────────────────────────────────────────────────────────────────────
+// Upgrade announcements. (soroban-sdk 26.0.1 does not re-export the
+// #[contractevent] macro, so these implement soroban_sdk::events::Event.)
+
+struct GovernanceEvent(&'static str);
+
+impl soroban_sdk::events::Event for GovernanceEvent {
+    fn topics(&self, env: &Env) -> Vec<Val> {
+        vec![&env, Symbol::new(env, self.0).into_val(env)]
+    }
+
+    fn data(&self, env: &Env) -> Val {
+        ().into_val(env)
+    }
+}
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -19,6 +38,8 @@ pub enum LeaderboardError {
     UnauthorizedCaller = 3,
     InvalidPoints = 4,
     NotAdmin = 5,
+    NoPendingUpgrade = 6,
+    UpgradeNotReady = 7,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -41,6 +62,8 @@ pub enum DataKey {
     TopPlayerSlot(Address),
     MinPoints, // u64 — points of the weakest entry currently in the top list
     MinSlot,   // u32 — slot index of that weakest entry
+    // ── Governance (issue #5) ─────────────────────────────────────────────
+    PendingUpgrade, // PendingUpgrade — instance
 }
 
 // OPT: PlayerEntry now embeds points directly (avoids a Stats read during sort)
@@ -74,6 +97,15 @@ pub struct UserStats {
     //      This eliminates the won_bets vs total_bets drift issue too.
 }
 
+// A proposed upgrade carries its proposal ledger sequence so execution can be
+// gated on the governance delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    pub proposed_at: u32, // ledger sequence at proposal
+}
+
 #[contract]
 pub struct LeaderboardContract;
 
@@ -103,18 +135,57 @@ impl LeaderboardContract {
         Ok(())
     }
 
-    // ── Upgradeability & Config (admin only) ──────────────────────────────────
+    // ── Governance: upgrades (admin + timelock) ──────────────────────────────
+    // Immediate `update_current_contract_wasm` is intentionally NOT available.
+    // Every upgrade must be PROPOSED, then EXECUTED after UPGRADE_DELAY_LEDGERS.
+    // Storage is preserved — only the executable changes.
 
-    /// Replace this contract's WASM in place. Admin only. Storage preserved.
-    pub fn upgrade(
+    pub fn propose_upgrade(
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), LeaderboardError> {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                wasm_hash: new_wasm_hash,
+                proposed_at: env.ledger().sequence(),
+            },
+        );
+        GovernanceEvent("upgrade_proposed").publish(&env);
         Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(LeaderboardError::NoPendingUpgrade)?;
+        if env.ledger().sequence().saturating_sub(pending.proposed_at) < UPGRADE_DELAY_LEDGERS {
+            return Err(LeaderboardError::UpgradeNotReady);
+        }
+        // Clear the proposal BEFORE the WASM swap: replaying execute_upgrade
+        // in the same transaction context would otherwise double-apply.
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        GovernanceEvent("upgrade_executed").publish(&env);
+        env.deployer().update_current_contract_wasm(pending.wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Ok(())
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     /// Re-point the trusted market and referral contracts. Admin only.
