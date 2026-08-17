@@ -1,5 +1,9 @@
 use crate::{PULSETokenContract, PULSETokenContractClient};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger, LedgerInfo},
+    Address, BytesN, Env, String,
+};
+use super::*;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -290,4 +294,99 @@ fn test_total_supply_tracking() {
     // Final: Alice = 100 - 20 - 30 = 50, Bob = 50 + 20 - 10 = 60
     assert_eq!(client.balance(&alice), 50_0000000_i128);
     assert_eq!(client.balance(&bob), 60_0000000_i128);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY REGRESSION SUITE — issue #5 (timelocked upgrades)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn advance_ledgers(env: &Env, n: u32) {
+    let current_seq = env.ledger().sequence();
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 1,
+        protocol_version: 26,
+        sequence_number: current_seq + n,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
+}
+
+// A real, deployable WASM blob so upgrade tests exercise the actual host
+// round-trip (upload + update_current_contract_wasm).
+const TEST_WASM: &[u8] = include_bytes!("../../testdata/upgrade_test_wasm.wasm");
+
+fn valid_wasm_hash(env: &Env) -> BytesN<32> {
+    env.deployer().upload_contract_wasm(TEST_WASM)
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_upgrade_propose_non_admin_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    init(&env, &client);
+    let rando = Address::generate(&env);
+    let hash = valid_wasm_hash(&env);
+    client.propose_upgrade(&rando, &hash);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_upgrade_execute_without_proposal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    client.execute_upgrade(&admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_upgrade_execute_before_delay_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let hash = valid_wasm_hash(&env);
+    client.propose_upgrade(&admin, &hash);
+    client.execute_upgrade(&admin); // too early
+}
+
+#[test]
+fn test_upgrade_full_lifecycle_with_replay_protection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let contract_id = client.address.clone();
+    let hash = valid_wasm_hash(&env);
+    client.propose_upgrade(&admin, &hash);
+    assert!(client.get_pending_upgrade().is_some());
+
+    advance_ledgers(&env, UPGRADE_DELAY_LEDGERS + 1);
+    client.execute_upgrade(&admin);
+
+    // Replay is impossible — the proposal record is consumed on execution.
+    // (After the swap the fixture wasm runs, so probe raw storage.)
+    let pending: Option<PendingUpgrade> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    });
+    assert!(pending.is_none());
+}
+
+#[test]
+fn test_upgrade_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let admin = init(&env, &client);
+    let hash = valid_wasm_hash(&env);
+    client.propose_upgrade(&admin, &hash);
+    client.cancel_upgrade(&admin);
+    let res = client.try_execute_upgrade(&admin);
+    assert!(res.is_err()); // NoPendingUpgrade (#7)
 }
