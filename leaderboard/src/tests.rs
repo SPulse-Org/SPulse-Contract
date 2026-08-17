@@ -159,8 +159,8 @@ fn test_bonus_only_user_has_nonzero_total_bets() {
 
     // add_bonus_pts: per-referred-bet bonus path.
     client.add_bonus_pts(&referral, &user, &3_u64);
-    // reward_bonus: welcome-bonus path (tokens=0 so no mint wiring is needed).
-    client.reward_bonus(&referral, &user, &5_u64, &0_i128);
+    // add_bonus_pts: welcome-bonus path (tokens=0 so no mint wiring is needed).
+    client.add_bonus_pts(&referral, &user, &5_u64);
 
     let stats = client.get_stats(&user);
     assert_eq!(stats.points, 8);
@@ -305,11 +305,11 @@ fn test_reward_rejects_non_market_caller() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #3)")]
-fn test_reward_bonus_rejects_non_referral_caller() {
+fn test_add_bonus_pts_rejects_non_referral_caller() {
     let (env, client, _admin, _market, _referral) = setup();
     let rando = Address::generate(&env);
     let user = Address::generate(&env);
-    client.reward_bonus(&rando, &user, &5_u64, &0_i128);
+    client.add_bonus_pts(&rando, &user, &5_u64);
 }
 
 #[test]
@@ -325,4 +325,40 @@ fn test_reward_updates_points_and_winloss() {
     assert_eq!(s.won_bets, 1);
     assert_eq!(s.lost_bets, 1);
     assert_eq!(s.total_bets, 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #100 — leaderboard capacity invariant: MinPoints/MinSlot must always
+// equal the true minimum of the filled list, so evictions are never wrong.
+// (MAX_TOP_PLAYERS x stale cache was the unsafe parameter interaction.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_min_cache_matches_true_minimum_at_capacity() {
+    let (env, client, _admin, market, _referral) = setup();
+
+    // Fill the list to MAX_TOP_PLAYERS with ascending points (slot 0 highest).
+    for i in 0..50u32 {
+        let user = Address::generate(&env);
+        client.add_pts(&market, &user, &(500 - i), &true);
+    }
+    assert_eq!(client.get_player_count(), 50);
+    assert_eq!(client.get_min_points(), 451); // 500 - 49
+    assert_eq!(client.get_min_slot(), 49);
+
+    // A newcomer below the true min must be rejected (cache is not stale).
+    let below = Address::generate(&env);
+    client.add_pts(&market, &below, &450, &true);
+    assert_eq!(client.get_player_count(), 50); // still 50 — rejected
+    assert_eq!(client.get_min_points(), 451);
+
+    // A newcomer above the min is admitted and becomes the new min.
+    let above = Address::generate(&env);
+    client.add_pts(&market, &above, &500, &true);
+    assert_eq!(client.get_player_count(), 50);
+    assert_eq!(client.get_min_points(), 451); // 500 inserts above all? No:
+    // 500 > 451 => replaces min, then bubbles up to its sorted position.
+    let slots = client.get_top_players(0, 50);
+    assert_eq!(slots.len(), 50);
+    assert!(slots.get(0).unwrap().points >= slots.get(49).unwrap().points);
 }

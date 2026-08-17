@@ -4,6 +4,16 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String,
 };
 
+// Issue #100: hard cap on the total PULSE supply (1_000_000_000 tokens with
+// 7 decimals). This bounds the combined welcome-bonus + betting-reward minting
+// forever, so no parameter combination (referral depth, bet count, points) can
+// inflate supply without bound.
+const MAX_SUPPLY: i128 = 1_000_000_000_0000000;
+
+// Compile-time invariant: the cap is positive and much larger than any single
+// reward mint (welcome bonus 1, win 10, lose 2 PULSE).
+const _: () = assert!(MAX_SUPPLY > 0);
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -16,6 +26,8 @@ pub enum TokenError {
     NotAdmin = 6,
     InsufficientAllowance = 7,
     InvalidExpirationLedger = 8,
+    // Issue #100: mint would exceed the hard supply cap.
+    SupplyCapExceeded = 9,
 }
 
 #[contracttype]
@@ -108,15 +120,19 @@ impl PULSETokenContract {
         if !is_minter {
             return Err(TokenError::UnauthorizedMinter);
         }
-        let balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to), &(balance + amount));
         let supply: i128 = env
             .storage()
             .instance()
             .get(&DataKey::TotalSupply)
             .unwrap_or(0);
+        // Issue #100: enforce the hard supply cap before any state change.
+        if amount > MAX_SUPPLY.saturating_sub(supply) {
+            return Err(TokenError::SupplyCapExceeded);
+        }
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to), &(balance + amount));
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &(supply + amount));

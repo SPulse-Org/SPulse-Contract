@@ -13,11 +13,13 @@ const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
-// Fee constants — multiply before divide to avoid precision loss
+// Fee constants — multiply before divide to avoid precision loss.
+// Issue #100 — SINGLE SOURCE OF TRUTH: NET_NUMERATOR is DERIVED from the fee
+// constants, so NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM can never drift.
 const TOTAL_FEE_BPS: i128 = 200;
 const PLATFORM_FEE_BPS: i128 = 150;
 const BPS_DENOM: i128 = 10_000;
-const NET_NUMERATOR: i128 = 9_800;
+const NET_NUMERATOR: i128 = BPS_DENOM - TOTAL_FEE_BPS;
 
 const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
@@ -33,6 +35,22 @@ const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated f
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// ── Issue #100: compile-time invariant matrix ────────────────────────────────
+// Every cross-constant relationship the protocol depends on is asserted at
+// compile time, so an unsafe combination can never be introduced silently.
+//   fee group:      net + total_fee == denom; 0 < platform <= total
+//   limits group:   positive, withdrawal cap within basis points
+//   timelock:       positive delay
+//   ttl group:      bump <= high (persistent bump must not outrun instance)
+const _: () = assert!(TOTAL_FEE_BPS > 0 && TOTAL_FEE_BPS < BPS_DENOM);
+const _: () = assert!(PLATFORM_FEE_BPS > 0 && PLATFORM_FEE_BPS <= TOTAL_FEE_BPS);
+const _: () = assert!(NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM);
+const _: () = assert!(MIN_BET > 0);
+const _: () = assert!(MAX_BETS_PER_USER > 0 && MAX_MARKETS_PER_HOUR > 0);
+const _: () = assert!(MAX_WITHDRAWAL_BPS > 0 && MAX_WITHDRAWAL_BPS <= BPS_DENOM);
+const _: () = assert!(WITHDRAW_DELAY_SECS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +104,12 @@ pub enum DataKey {
     RateWindow, // packed u64: high32=window_start_hi, low32=count
     // ── Settlement-time payouts (issue #2) ───────────────────────────────
     Payout(u64, Address), // i128 — exact payout computed at resolve time
+    // ── Issue #100: per-market fee provenance (issue #42 family) ──────────
+    // Exactly how much of the global AccumulatedFees this market contributed
+    // (platform fee + referral fee that was held because no referrer was paid,
+    // + swept user principal). Lets cancel_market/cancel_refund release only
+    // what belongs to this market — the clamped-200bps formula is gone.
+    MarketFees(u64),
     // ── Timelocked withdrawal requests (issue #12) ───────────────────────
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
 }
@@ -100,12 +124,14 @@ pub struct Config {
     pub xlm_sac: Address,
 }
 
-// ── BetEntry: Bet + Gross + BetCount in one slot ──────────────────────────
+// ── BetEntry: bet + gross + stake in one slot ──────────────────────────────
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetEntry {
-    pub net: i128,   // post-fee amount bet (used for payout)
-    pub gross: i128, // pre-fee amount sent (used for cancel_refund)
+    pub net: i128,        // post-fee amount bet (used for payout)
+    pub gross: i128,      // pre-fee amount sent (used for cancel_refund)
+    pub refundable: i128, // net + platform fee + referral fee (iff never paid out)
+                          // — EXACTLY what the contract still holds for this bet
     pub is_yes: bool,
     pub claimed: bool,
     pub count: u32, // how many times this user has bet on this market
@@ -447,17 +473,37 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::AccumulatedFees, &acc_fees);
 
-        // ── Write BetEntry (net + gross + count in one write) ─────────────
+        // ── Issue #100: per-market fee provenance ───────────────────────
+        // Exactly how much of this bet the contract holds as "fees" (platform
+        // always; referral only when it was never paid out): this is what a
+        // later cancellation may release back — nothing more, nothing less.
+        let held_fees = platform_fee + if paid_referrer { 0 } else { referral_fee };
+        let mkt_fees_key = DataKey::MarketFees(market_id);
+        let mkt_fees: i128 = env
+            .storage()
+            .persistent()
+            .get(&mkt_fees_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&mkt_fees_key, &(mkt_fees + held_fees));
+        env.storage()
+            .persistent()
+            .extend_ttl(&mkt_fees_key, TTL_BUMP, TTL_HIGH);
+
+        // ── Write BetEntry (net + gross + refundable + count in one write) ──
         let new_entry = match existing {
             Some(mut e) => {
                 e.net += net;
                 e.gross += amount;
+                e.refundable += net + held_fees;
                 e.count += 1;
                 e
             }
             None => BetEntry {
                 net,
                 gross: amount,
+                refundable: net + held_fees,
                 is_yes,
                 claimed: false,
                 count: 1,
@@ -541,6 +587,19 @@ impl PredictionMarketContract {
             // design). Bettors still earn tokens/points via claim().
             if total_pool > 0 {
                 acc_fees += total_pool;
+                // Provenance (issue #100): this sweep belongs to THIS market.
+                let mkt_fees_key = DataKey::MarketFees(market_id);
+                let mkt_fees: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&mkt_fees_key)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&mkt_fees_key, &(mkt_fees + total_pool));
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&mkt_fees_key, TTL_BUMP, TTL_HIGH);
             }
         } else {
             // Settlement-time payouts (issue #2): compute EXACT per-winner
@@ -581,6 +640,19 @@ impl PredictionMarketContract {
             debug_assert!(dust >= 0, "payouts must never exceed the pool");
             if dust > 0 {
                 acc_fees += dust;
+                // Issue #100: dust provenance goes to THIS market.
+                let mkt_fees_key = DataKey::MarketFees(market_id);
+                let mkt_fees: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&mkt_fees_key)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&mkt_fees_key, &(mkt_fees + dust));
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&mkt_fees_key, TTL_BUMP, TTL_HIGH);
             }
         }
 
@@ -619,23 +691,13 @@ impl PredictionMarketContract {
             .persistent()
             .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
 
-        // Reclaim fees — net * fee_rate / (1 - fee_rate)
-        let net_pool = market.total_yes + market.total_no;
-        let fees_in_pool = net_pool * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS);
-        let mut acc_fees: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccumulatedFees)
-            .unwrap_or(0);
-        acc_fees = if fees_in_pool < acc_fees {
-            acc_fees - fees_in_pool
-        } else {
-            0
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::AccumulatedFees, &acc_fees);
-
+        // Issue #100: NO global reclaim here. This market's fee contribution is
+        // tracked exactly in the MarketFees ledger, and every user's cancel
+        // refund drains exactly their refundable (net + platform fee + referral
+        // fee iff never paid out). The old `net*200bps/(10000-200bps)` formula
+        // treated ALL 2% as reclaimable even when the referrer had already been
+        // paid, and clamped the whole accumulator — stealing fees from other
+        // markets. Refunds now self-balance: Σ refundable == pool + fees_market.
         Ok(())
     }
 
@@ -655,12 +717,27 @@ impl PredictionMarketContract {
             .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
 
-        if entry.gross == 0 {
+        if entry.refundable == 0 {
             return Err(MarketError::NoBetFound);
         }
 
-        let gross = entry.gross;
-        entry.gross = 0; // idempotency guard
+        let refundable = entry.refundable;
+        // Issue #100: the fee portion of this refund (platform + held referral)
+        // is drained from AccumulatedFees — exactly this market's own share,
+        // never another market's.
+        let fee_share = refundable - entry.net;
+        let mut acc_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0);
+        acc_fees = acc_fees.saturating_sub(fee_share);
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &acc_fees);
+
+        entry.gross = 0;
+        entry.refundable = 0; // idempotency guard
         env.storage().persistent().set(&bet_key, &entry);
         // Read-time TTL refresh (issue #9): a refund must not be able to observe
         // an expired bet/market record — keep both alive so a user who returns
@@ -676,10 +753,10 @@ impl PredictionMarketContract {
         token::Client::new(&env, &cfg.xlm_sac).transfer(
             &env.current_contract_address(),
             &user,
-            &gross,
+            &refundable,
         );
 
-        Ok(gross)
+        Ok(refundable)
     }
 
     // ── Claim ─────────────────────────────────────────────────────────────
@@ -708,7 +785,6 @@ impl PredictionMarketContract {
         }
 
         let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
         let winning_side = if market.outcome {
             market.total_yes
         } else {
@@ -756,18 +832,35 @@ impl PredictionMarketContract {
             (LOSE_POINTS, LOSE_TOKENS)
         };
 
+        // The leaderboard API was renamed reward() -> add_pts() (points only,
+        // no token amount), and add_pts no longer mints PULSE internally. The
+        // market mints the PULSE reward directly — it is the authorized minter
+        // for this legacy wiring, keeping the original mint semantics intact.
         let _: Val = env.invoke_contract(
             &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
+            &Symbol::new(&env, "add_pts"),
             vec![
                 &env,
                 this.clone().into_val(&env),
                 user.clone().into_val(&env),
                 points.into_val(&env),
-                tokens.into_val(&env),
                 real_win.into_val(&env),
             ],
         );
+        if tokens > 0 {
+            // PULSE is a custom token contract (not a token::Client-compatible
+            // SAC interface): mint directly via its exported `mint` ABI.
+            let _: Val = env.invoke_contract(
+                &cfg.token,
+                &Symbol::new(&env, "mint"),
+                vec![
+                    &env,
+                    this.clone().into_val(&env),
+                    user.clone().into_val(&env),
+                    tokens.into_val(&env),
+                ],
+            );
+        }
 
         Ok(())
     }
@@ -989,6 +1082,16 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0)
+    }
+
+    /// Issue #100: how much of the global AccumulatedFees was contributed by
+    /// this market (fees + swept pools/dust). Gives full provenance:
+    /// Σ_markets get_market_fees(m) == AccumulatedFees (feed + held + sweep).
+    pub fn get_market_fees(env: Env, market_id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MarketFees(market_id))
             .unwrap_or(0)
     }
 
