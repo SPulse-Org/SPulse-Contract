@@ -71,12 +71,20 @@ pub struct LeaderboardContract;
 
 #[contractimpl]
 impl LeaderboardContract {
+    // Centralized TTL bump for instance storage.
+    // Instance storage (MinPoints, MinSlot, TopPlayerCount, Admin, MarketContract, etc.)
+    // has its own TTL that must be refreshed on ANY contract interaction.
+    // Scattered per-branch extend_ttl calls are removed in favor of this guarantee.
+    fn bump_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+    }
     pub fn initialize(
         env: Env,
         admin: Address,
         market_contract: Address,
         referral_contract: Address,
     ) -> Result<(), LeaderboardError> {
+        Self::bump_instance_ttl(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(LeaderboardError::AlreadyInitialized);
         }
@@ -87,8 +95,11 @@ impl LeaderboardContract {
         env.storage().instance().set(&DataKey::TopPlayerCount, &0_u32);
         env.storage().instance().set(&DataKey::MinPoints, &0_u64);
         env.storage().instance().set(&DataKey::MinSlot, &0_u32);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
+    }
+
+    pub fn bump_ttl(env: Env) {
+        Self::bump_instance_ttl(&env);
     }
 
     pub fn set_token_contract(env: Env, admin: Address, token: Address) -> Result<(), LeaderboardError> {
@@ -102,7 +113,6 @@ impl LeaderboardContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::TokenContract, &token);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
 
@@ -113,6 +123,7 @@ impl LeaderboardContract {
         pts: u64,
         is_won: bool,
     ) -> Result<(), LeaderboardError> {
+        Self::bump_instance_ttl(&env);
         let market: Address = env
             .storage()
             .instance()
@@ -146,10 +157,6 @@ impl LeaderboardContract {
         env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
 
         Self::update_top_players(&env, user, stats.points);
-        // Instance storage (TopPlayerCount, MinPoints, MinSlot, Admin, etc.)
-        // has its own TTL that is never bumped by persistent-key writes above —
-        // refresh it on every write so the leaderboard's cached min survives.
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
 
@@ -159,6 +166,7 @@ impl LeaderboardContract {
         user: Address,
         pts: u64,
     ) -> Result<(), LeaderboardError> {
+        Self::bump_instance_ttl(&env);
         let referral: Address = env
             .storage()
             .instance()
@@ -187,11 +195,11 @@ impl LeaderboardContract {
         env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
 
         Self::update_top_players(&env, user, stats.points);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
 
     pub fn get_points(env: Env, user: Address) -> u64 {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .persistent()
             .get::<_, PlayerStats>(&DataKey::Stats(user))
@@ -200,6 +208,7 @@ impl LeaderboardContract {
     }
 
     pub fn get_stats(env: Env, user: Address) -> PlayerStats {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::Stats(user))
@@ -212,6 +221,7 @@ impl LeaderboardContract {
     }
 
     pub fn get_top_players(env: Env, offset: u32, page_size: u32) -> Vec<PlayerEntry> {
+        Self::bump_instance_ttl(&env);
         let count: u32 = env
             .storage()
             .instance()
@@ -226,6 +236,10 @@ impl LeaderboardContract {
         let mut result = Vec::new(&env);
         for i in offset..end {
             if let Some(entry) = env.storage().persistent().get(&DataKey::TopPlayerAt(i)) {
+                env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(i), TTL_BUMP, TTL_HIGH);
+                if let Some(slot) = env.storage().persistent().get::<_, u32>(&DataKey::TopPlayerSlot(entry.address.clone())) {
+                    env.storage().persistent().extend_ttl(&DataKey::TopPlayerSlot(entry.address.clone()), TTL_BUMP, TTL_HIGH);
+                }
                 result.push_back(entry);
             }
         }
@@ -233,6 +247,7 @@ impl LeaderboardContract {
     }
 
     pub fn get_top_player_count(env: Env) -> u32 {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::TopPlayerCount)
@@ -240,6 +255,7 @@ impl LeaderboardContract {
     }
 
     pub fn get_min_points(env: Env) -> u64 {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MinPoints)
@@ -247,6 +263,7 @@ impl LeaderboardContract {
     }
 
     pub fn get_min_slot(env: Env) -> u32 {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
             .get(&DataKey::MinSlot)
@@ -316,8 +333,6 @@ impl LeaderboardContract {
             };
             env.storage().persistent().set(&DataKey::TopPlayerAt(slot), &entry);
             env.storage().persistent().set(&DataKey::TopPlayerSlot(user.clone()), &slot);
-            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(slot), TTL_BUMP, TTL_HIGH);
-            env.storage().instance().set(&DataKey::TopPlayerCount, &(count + 1));
 
             // Bubble up to maintain order.
             let mut current = slot;
@@ -369,7 +384,6 @@ impl LeaderboardContract {
                 };
                 env.storage().persistent().set(&DataKey::TopPlayerAt(min_slot), &new_entry);
                 env.storage().persistent().set(&DataKey::TopPlayerSlot(user.clone()), &min_slot);
-                env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(min_slot), TTL_BUMP, TTL_HIGH);
 
                 // Bubble up from min_slot.
                 let mut current = min_slot;
