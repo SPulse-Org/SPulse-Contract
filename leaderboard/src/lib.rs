@@ -320,6 +320,7 @@ impl LeaderboardContract {
                     .unwrap();
                 env.storage().instance().set(&DataKey::MinPoints, &min_entry.points);
                 env.storage().instance().set(&DataKey::MinSlot, &min_slot);
+                env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
             }
             return;
         }
@@ -363,6 +364,7 @@ impl LeaderboardContract {
                     .unwrap();
                 env.storage().instance().set(&DataKey::MinPoints, &min_entry.points);
                 env.storage().instance().set(&DataKey::MinSlot, &min_slot);
+                env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
             }
         } else {
             // List full: replace the minimum if the new points beat it.
@@ -413,6 +415,7 @@ impl LeaderboardContract {
                     .unwrap();
                 env.storage().instance().set(&DataKey::MinPoints, &new_min_entry.points);
                 env.storage().instance().set(&DataKey::MinSlot, &new_min_slot);
+                env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
             }
         }
     }
