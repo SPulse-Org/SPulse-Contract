@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl,
+    contract, contractimpl, symbol_short,
     testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -1836,4 +1836,130 @@ fn test_unilateral_upgrade_fails_closed_then_recovers() {
 
     assert_eq!(t.xlm.balance(&user), 198_0000000);
     assert_eq!(t.token_client.balance(&user), 10_0000000);
+}
+
+// ── Issue #40: revocable trust model ────────────────────────────────────────
+// prediction_market trusts cfg.referral (place_bet credit) and cfg.leaderboard
+// (claim reward). revoke_trust severs the relationship: affected calls fail
+// closed with TrustRevoked (#28) until restore_trust.
+
+#[test]
+fn test_revoke_referral_blocks_place_bet_and_restore_reenables() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // Enabled: bet works.
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    assert_eq!(t.xlm.balance(&user), 100_0000000);
+
+    // Revoke referral role.
+    t.client.revoke_trust(&t.admin, &symbol_short!("referral"));
+    assert!(t.client.is_trust_revoked(&symbol_short!("referral")));
+
+    // place_bet now fails closed with TrustRevoked.
+    let user2 = Address::generate(&t.env);
+    fund_user(&t, &user2, 200_0000000);
+    assert_market_error(
+        t.client
+            .try_place_bet(&user2, &id, &true, &100_0000000_i128),
+        MarketError::TrustRevoked,
+    );
+
+    // Read-only views unaffected.
+    assert_eq!(t.client.get_market(&id).bet_count, 1);
+
+    // Restore re-enables betting.
+    t.client.restore_trust(&t.admin, &symbol_short!("referral"));
+    t.client.place_bet(&user2, &id, &false, &100_0000000_i128);
+    assert!(!t.client.is_trust_revoked(&symbol_short!("referral")));
+}
+
+#[test]
+fn test_revoke_leaderboard_blocks_claim_and_restore_reenables() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Revoke leaderboard role.
+    t.client
+        .revoke_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+
+    // claim fails closed (no XLM payout, no reward, bet not consumed).
+    let pre = t.xlm.balance(&user);
+    assert_market_error(t.client.try_claim(&user, &id), MarketError::TrustRevoked);
+    assert_eq!(t.xlm.balance(&user), pre);
+    assert_eq!(t.token_client.balance(&user), 0);
+    assert_eq!(t.leaderboard_client.get_points(&user), 0);
+
+    // Restore re-enables the claim.
+    t.client
+        .restore_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+    t.client.claim(&user, &id);
+    // Single-bettor market: winner recovers their net stake + others' pool share.
+    assert_eq!(t.xlm.balance(&user), pre + 98_0000000);
+    assert_eq!(t.token_client.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_repointing_config_does_not_clear_revocation() {
+    // Re-pointing cfg.referral via set_config must NOT silently bypass an
+    // emergency revocation — only restore_trust re-enables the role.
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.revoke_trust(&t.admin, &symbol_short!("referral"));
+    let replacement = Address::generate(&t.env);
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &replacement,
+        &t.leaderboard_client.address,
+        &t.xlm.address,
+    );
+
+    assert!(t.client.is_trust_revoked(&symbol_short!("referral")));
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::TrustRevoked,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.client.revoke_trust(&attacker, &symbol_short!("referral"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.revoke_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.restore_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let t = setup();
+    assert!(!t.client.is_trust_revoked(&symbol_short!("referral")));
+    assert!(!t
+        .client
+        .is_trust_revoked(&Symbol::new(&t.env, "leaderboard")));
 }

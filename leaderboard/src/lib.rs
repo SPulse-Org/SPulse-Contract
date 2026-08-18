@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Error, IntoVal,
-    Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env,
+    Error, IntoVal, Symbol, Val, Vec,
 };
 
 const MAX_TOP_PLAYERS: u32 = 50;
@@ -34,6 +34,12 @@ pub enum LeaderboardError {
     InterfaceVersionMissing = 6,
     // The target contract's interface version is below the required minimum.
     IncompatibleInterface = 7,
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // The trusted contract for a role was revoked by the admin; every operation
+    // that depends on that role fails closed until restore_trust is called.
+    TrustRevoked = 8,
+    // revoke_trust/restore_trust was called with an unknown role symbol.
+    InvalidRole = 9,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -58,6 +64,12 @@ pub enum DataKey {
     MinSlot,   // u32 — slot index of that weakest entry
     // ── Interface versioning (upgrade coordination) ───────────────────────
     InterfaceVersion, // u32 — current interface version of this contract
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Persistent flag (true) meaning the trusted contract for `role` is
+    // revoked. Absent key == trusted/enabled. Stored in persistent storage so
+    // it survives instance-storage rewrites and follows the same TTL
+    // management as the rest of the contract's persistent state.
+    TrustRevoked(Symbol),
 }
 
 // OPT: PlayerEntry now embeds points directly (avoids a Stats read during sort)
@@ -205,6 +217,80 @@ impl LeaderboardContract {
         Ok(())
     }
 
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Each trusted dependency (market, referral, token) is tracked as a role.
+    // The admin can revoke a role to sever the trust relationship immediately —
+    // every operation that depends on it then fails closed with TrustRevoked.
+    // Restoration is an explicit, admin-only act; replacing the trusted address
+    // (set_contracts/set_token_contract) does NOT re-enable a revoked role, so
+    // a rushed re-point cannot silently bypass an emergency revocation.
+
+    /// Revoke trust in the contract bound to `role`. Admin only.
+    ///
+    /// Roles: "market", "referral", "token". After revocation, all functions
+    /// that depend on the role fail closed with `TrustRevoked` until the admin
+    /// explicitly calls `restore_trust` (a replacement address via
+    /// `set_contracts`/`set_token_contract` does not clear the revocation).
+    pub fn revoke_trust(env: Env, admin: Address, role: Symbol) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(LeaderboardError::InvalidRole);
+        }
+        let key = DataKey::TrustRevoked(role);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Restore trust in the contract bound to `role`. Admin only.
+    ///
+    /// Clears a prior `revoke_trust` for the role. The configured address for
+    /// the role (current or replaced via set_contracts/set_token_contract) is
+    /// trusted again. This is the ONLY way to re-enable a revoked role.
+    pub fn restore_trust(env: Env, admin: Address, role: Symbol) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(LeaderboardError::InvalidRole);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustRevoked(role));
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Read-only trust status for `role` (true == revoked). Never panics and
+    /// never requires admin — usable by anyone to observe revocation state.
+    pub fn is_trust_revoked(env: Env, role: Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+    }
+
+    fn is_known_role(env: &Env, role: &Symbol) -> bool {
+        *role == Symbol::new(env, "market")
+            || *role == Symbol::new(env, "referral")
+            || *role == Symbol::new(env, "token")
+    }
+
+    fn require_trust_not_revoked(env: &Env, role: Symbol) -> Result<(), LeaderboardError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+        {
+            return Err(LeaderboardError::TrustRevoked);
+        }
+        Ok(())
+    }
+
     pub fn add_pts(
         env: Env,
         caller: Address,
@@ -220,6 +306,9 @@ impl LeaderboardContract {
         if caller != market {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
+        // Issue #40: even the on-record market cannot drive add_pts once its
+        // trust role has been revoked by the admin.
+        Self::require_trust_not_revoked(&env, symbol_short!("market"))?;
         caller.require_auth();
 
         let mut stats: PlayerStats = env
@@ -282,6 +371,10 @@ impl LeaderboardContract {
         // incompatible upgrade fails the whole call atomically instead of
         // awarding points and only then discovering the ABI mismatch.
         if tokens > 0 {
+            // Issue #40: a revoked token role fails the entire reward (points
+            // included) — no partial award when the mint that owes the user
+            // their PULSE would be refused by a severed trust relationship.
+            Self::require_trust_not_revoked(&env, symbol_short!("token"))?;
             let token: Address = env
                 .storage()
                 .instance()
@@ -348,6 +441,9 @@ impl LeaderboardContract {
         if caller != referral {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
+        // Issue #40: even the on-record referral cannot drive add_bonus_pts
+        // once its trust role has been revoked by the admin.
+        Self::require_trust_not_revoked(&env, symbol_short!("referral"))?;
         caller.require_auth();
 
         let mut stats: PlayerStats = env
@@ -398,6 +494,9 @@ impl LeaderboardContract {
         // Upgrade coordination: verify the PULSE token exposes a compatible
         // `mint` interface BEFORE any local state changes (see reward()).
         if tokens > 0 {
+            // Issue #40: a revoked token role fails the entire reward_bonus —
+            // no partial bonus when the mint it owes the user would be refused.
+            Self::require_trust_not_revoked(&env, symbol_short!("token"))?;
             let token: Address = env
                 .storage()
                 .instance()
@@ -581,6 +680,9 @@ impl LeaderboardContract {
         if *caller != market {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
+        // Issue #40: even an on-record market cannot drive add_pts/reward/
+        // record_bet once its trust role has been revoked by the admin.
+        Self::require_trust_not_revoked(env, symbol_short!("market"))?;
         Ok(())
     }
 
@@ -593,6 +695,9 @@ impl LeaderboardContract {
         if *caller != referral {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
+        // Issue #40: a revoked referral can no longer drive add_bonus_pts /
+        // reward_bonus.
+        Self::require_trust_not_revoked(env, symbol_short!("referral"))?;
         Ok(())
     }
 

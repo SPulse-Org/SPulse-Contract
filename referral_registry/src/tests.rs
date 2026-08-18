@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl,
+    contract, contractimpl, symbol_short,
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -561,4 +561,154 @@ fn test_credit_rejects_missing_leaderboard_version() {
     // Fail closed BEFORE the fee transfer.
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
     assert_eq!(xlm_client.balance(&referrer), 0);
+}
+
+// ── Issue #40: revocable trust model ─────────────────────────────────────────
+// referral_registry trusts the market (credit caller), the leaderboard
+// (reward_bonus / add_bonus_pts) and the XLM SAC (fee payouts). revoke_trust
+// severs the relationship: dependent calls fail closed with TrustRevoked (#9)
+// until restore_trust.
+
+#[test]
+fn test_revoke_market_blocks_credit_and_restore_reenables() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    // Revoke market role.
+    t.client.revoke_trust(&t.admin, &symbol_short!("market"));
+    assert!(t.client.is_trust_revoked(&symbol_short!("market")));
+
+    // credit fails closed before paying the referrer.
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+    assert_eq!(t.client.get_earnings(&referrer), 0);
+
+    // Restore re-enables credit.
+    t.client.restore_trust(&t.admin, &symbol_short!("market"));
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+fn test_revoke_leaderboard_blocks_register_and_credit() {
+    let t = setup();
+
+    // Register a user WITH a referrer while the leaderboard is still trusted.
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    // Revoke leaderboard role.
+    t.client
+        .revoke_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+
+    // A NEW registration fails closed with no profile written.
+    let late = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&late, &String::from_str(&t.env, "Solo"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert!(!t.client.is_registered(&late));
+
+    // credit that would award the referrer the leaderboard bonus also fails
+    // closed BEFORE the fee transfer.
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Restore re-enables registration.
+    t.client
+        .restore_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+    t.client
+        .register_referral(&late, &String::from_str(&t.env, "Solo"), &None);
+    assert!(t.client.is_registered(&late));
+}
+
+#[test]
+fn test_revoke_xlm_sac_blocks_credit_payout() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    // Revoke the XLM SAC role — no fee payout may move through it.
+    t.client.revoke_trust(&t.admin, &symbol_short!("xlm_sac"));
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Restore re-enables the payout.
+    t.client.restore_trust(&t.admin, &symbol_short!("xlm_sac"));
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.client.revoke_trust(&attacker, &symbol_short!("market"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.revoke_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.restore_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let t = setup();
+    assert!(!t.client.is_trust_revoked(&symbol_short!("market")));
+    assert!(!t
+        .client
+        .is_trust_revoked(&Symbol::new(&t.env, "leaderboard")));
+    assert!(!t.client.is_trust_revoked(&symbol_short!("token")));
+    assert!(!t.client.is_trust_revoked(&symbol_short!("xlm_sac")));
 }
