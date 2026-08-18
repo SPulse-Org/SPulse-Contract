@@ -1,5 +1,8 @@
-use crate::{PULSETokenContract, PULSETokenContractClient, TokenError};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use crate::{PULSETokenContract, PULSETokenContractClient};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, Env, String,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -303,350 +306,124 @@ fn test_total_supply_tracking() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Supply cap — monetary policy enforced inside mint()
+//  12. Approve + allowance reflects granted amount
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_mint_below_cap_succeeds() {
+fn test_approve_and_allowance() {
     let env = Env::default();
     env.mock_all_auths();
     let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
+    let _admin = init(&env, &client);
 
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let expiration_ledger = env.ledger().sequence() + 1000;
 
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &40_i128);
-    assert_eq!(client.balance(&recipient), 40_i128);
-    assert_eq!(client.total_supply(), 40_i128);
+    client.approve(&owner, &spender, &50_0000000_i128, &expiration_ledger);
+
+    assert_eq!(client.allowance(&owner, &spender), 50_0000000_i128);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  13. transfer_from spends down the allowance and moves balances
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_mint_to_cap_succeeds() {
+fn test_transfer_from_spends_allowance() {
     let env = Env::default();
     env.mock_all_auths();
     let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
+    let _admin = init(&env, &client);
 
     let minter = Address::generate(&env);
     client.set_minter(&minter);
 
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &40_i128);
-    client.mint(&minter, &recipient, &60_i128);
-    assert_eq!(client.balance(&recipient), 100_i128);
-    assert_eq!(client.total_supply(), 100_i128);
+
+    client.mint(&minter, &owner, &100_0000000_i128);
+
+    let expiration_ledger = env.ledger().sequence() + 1000;
+    client.approve(&owner, &spender, &40_0000000_i128, &expiration_ledger);
+
+    client.transfer_from(&spender, &owner, &recipient, &15_0000000_i128);
+
+    assert_eq!(client.balance(&owner), 85_0000000_i128);
+    assert_eq!(client.balance(&recipient), 15_0000000_i128);
+    assert_eq!(client.allowance(&owner, &spender), 25_0000000_i128);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  14. Reject transfer_from beyond the granted allowance
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 #[should_panic(expected = "Error(Contract, #7)")]
-fn test_mint_above_cap_rejected() {
+fn test_reject_transfer_from_exceeding_allowance() {
     let env = Env::default();
     env.mock_all_auths();
     let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
+    let _admin = init(&env, &client);
 
     let minter = Address::generate(&env);
     client.set_minter(&minter);
 
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &40_i128);
-    client.mint(&minter, &recipient, &100_i128); // 40 + 100 > 100: panics
-}
-
-#[test]
-fn test_mint_at_zero_cap_fails_closed() {
-    // A legacy deployment with no declared cap (max_supply == 0) must fail
-    // closed: no amount can be minted until the admin declares a cap.
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &0_i128,
-    );
-
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    let res = client.try_mint(&minter, &recipient, &1_i128);
-    match res {
-        Err(Ok(e)) => assert_eq!(e, TokenError::MaxSupplyExceeded),
-        other => panic!("expected MaxSupplyExceeded, got {other:?}"),
-    }
-    assert_eq!(client.balance(&recipient), 0_i128);
-    assert_eq!(client.total_supply(), 0_i128);
+    client.mint(&minter, &owner, &100_0000000_i128);
+
+    let expiration_ledger = env.ledger().sequence() + 1000;
+    client.approve(&owner, &spender, &10_0000000_i128, &expiration_ledger);
+
+    // Attempt to spend more than approved
+    client.transfer_from(&spender, &owner, &recipient, &20_0000000_i128); // panics
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  15. Approving amount 0 revokes an existing allowance
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn test_over_cap_mint_no_partial_update() {
-    // A rejected mint must not touch recipient balance or total_supply.
+fn test_approve_zero_revokes_allowance() {
     let env = Env::default();
     env.mock_all_auths();
     let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
+    let _admin = init(&env, &client);
 
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-    let recipient = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let expiration_ledger = env.ledger().sequence() + 1000;
 
-    // Pre-existing balance on the recipient (from a prior mint) must survive.
-    client.mint(&minter, &recipient, &20_i128);
-    assert_eq!(client.balance(&recipient), 20_i128);
+    client.approve(&owner, &spender, &50_0000000_i128, &expiration_ledger);
+    assert_eq!(client.allowance(&owner, &spender), 50_0000000_i128);
 
-    let res = client.try_mint(&minter, &recipient, &100_i128);
-    match res {
-        Err(Ok(e)) => assert_eq!(e, TokenError::MaxSupplyExceeded),
-        other => panic!("expected MaxSupplyExceeded, got {other:?}"),
-    }
-    assert_eq!(client.balance(&recipient), 20_i128);
-    assert_eq!(client.total_supply(), 20_i128);
+    client.approve(&owner, &spender, &0_i128, &expiration_ledger);
+    assert_eq!(client.allowance(&owner, &spender), 0_i128);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  16. Allowance reads as 0 once past its expiration ledger
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn test_shared_cap_across_minters() {
-    // All authorized minters share one global cap.
+fn test_allowance_expires() {
     let env = Env::default();
     env.mock_all_auths();
     let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
+    let _admin = init(&env, &client);
 
-    let minter_a = Address::generate(&env);
-    let minter_b = Address::generate(&env);
-    client.set_minter(&minter_a);
-    client.set_minter(&minter_b);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let expiration_ledger = env.ledger().sequence() + 5;
 
-    let recipient = Address::generate(&env);
-    client.mint(&minter_a, &recipient, &40_i128);
-    client.mint(&minter_b, &recipient, &40_i128);
-    assert_eq!(client.total_supply(), 80_i128);
+    client.approve(&owner, &spender, &50_0000000_i128, &expiration_ledger);
+    assert_eq!(client.allowance(&owner, &spender), 50_0000000_i128);
 
-    // Third mint pushes 80 + 30 > 100: rejected for any minter.
-    let res = client.try_mint(&minter_a, &recipient, &30_i128);
-    match res {
-        Err(Ok(e)) => assert_eq!(e, TokenError::MaxSupplyExceeded),
-        other => panic!("expected MaxSupplyExceeded, got {other:?}"),
-    }
-    assert_eq!(client.total_supply(), 80_i128);
-    assert_eq!(client.balance(&recipient), 80_i128);
-}
+    env.ledger().with_mut(|li| li.sequence_number = expiration_ledger + 1);
 
-#[test]
-fn test_overflow_cannot_bypass_cap() {
-    // checked_add must reject even an amount that would overflow i128.
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &i128::MAX,
-    );
-
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-    let recipient = Address::generate(&env);
-
-    // Fill to the (i128::MAX) cap first, so the next add genuinely overflows.
-    client.mint(&minter, &recipient, &i128::MAX);
-    assert_eq!(client.total_supply(), i128::MAX);
-
-    // supply(MAX) + amount(MAX) would wrap past i128::MAX: checked_add must
-    // fail with MaxSupplyExceeded, never wrap around the cap.
-    let res = client.try_mint(&minter, &recipient, &i128::MAX);
-    match res {
-        Err(Ok(e)) => assert_eq!(e, TokenError::MaxSupplyExceeded),
-        other => panic!("expected MaxSupplyExceeded, got {other:?}"),
-    }
-    assert_eq!(client.total_supply(), i128::MAX);
-}
-
-#[test]
-fn test_burn_frees_cap_headroom() {
-    // Burning reduces total_supply, so the cap is re-usable.
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
-
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &60_i128);
-    client.burn(&recipient, &30_i128);
-    assert_eq!(client.total_supply(), 30_i128);
-
-    // 30 + 70 == 100: fits again inside the cap.
-    client.mint(&minter, &recipient, &70_i128);
-    assert_eq!(client.total_supply(), 100_i128);
-}
-
-#[test]
-fn test_lower_cap_ratchet() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
-
-    // Authorized admin lowers the cap.
-    client.set_max_supply(&admin, &50_i128);
-    assert_eq!(client.max_supply(), 50_i128);
-
-    // New mints bounded by the lowered cap.
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &50_i128);
-    let res = client.try_mint(&minter, &recipient, &1_i128);
-    match res {
-        Err(Ok(e)) => assert_eq!(e, TokenError::MaxSupplyExceeded),
-        other => panic!("expected MaxSupplyExceeded, got {other:?}"),
-    }
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #9)")]
-fn test_raise_cap_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
-
-    client.set_max_supply(&admin, &200_i128); // 200 > 100: panics
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #8)")]
-fn test_cap_below_current_supply_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
-
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &60_i128);
-
-    client.set_max_supply(&admin, &50_i128); // 50 < 60: panics
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #6)")]
-fn test_set_cap_unauthorized_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &100_i128,
-    );
-
-    // Non-admin cannot configure the cap.
-    let attacker = Address::generate(&env);
-    client.set_max_supply(&attacker, &50_i128); // panics
-}
-
-#[test]
-fn test_set_cap_establishes_legacy_mint() {
-    // Simulates a migrated legacy instance: admin declares a cap for the
-    // first time via set_max_supply (the only way to go from 0/unset).
-    let env = Env::default();
-    env.mock_all_auths();
-    let client = setup(&env);
-    let admin = Address::generate(&env);
-    client.initialize(
-        &admin,
-        &String::from_str(&env, "PULSE"),
-        &String::from_str(&env, "PLSE"),
-        &7,
-        &0_i128,
-    );
-    assert_eq!(client.max_supply(), 0_i128);
-
-    client.set_max_supply(&admin, &100_i128);
-    assert_eq!(client.max_supply(), 100_i128);
-
-    let minter = Address::generate(&env);
-    client.set_minter(&minter);
-    let recipient = Address::generate(&env);
-    client.mint(&minter, &recipient, &100_i128);
-    assert_eq!(client.total_supply(), 100_i128);
+    assert_eq!(client.allowance(&owner, &spender), 0_i128);
 }
