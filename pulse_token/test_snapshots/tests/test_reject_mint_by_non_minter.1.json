@@ -1,4 +1,4 @@
-﻿{
+{
   "generators": {
     "address": 4,
     "nonce": 0,
@@ -83,6 +83,18 @@
                       },
                       "val": {
                         "u32": 7
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {
