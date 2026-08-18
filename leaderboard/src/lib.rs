@@ -18,6 +18,7 @@ pub enum LeaderboardError {
     UnauthorizedCaller = 3,
     InvalidPoints = 4,
     NotAdmin = 5,
+    PlayerBanned = 6,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -40,6 +41,7 @@ pub enum DataKey {
     TopPlayerSlot(Address),
     MinPoints, // u64 — points of the weakest entry currently in the top list
     MinSlot,   // u32 — slot index of that weakest entry
+    Banned(Address),
 }
 
 // OPT: PlayerEntry now embeds points directly (avoids a Stats read during sort)
@@ -131,6 +133,9 @@ impl LeaderboardContract {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
         caller.require_auth();
+        if Self::is_banned_internal(&env, &user) {
+            return Err(LeaderboardError::PlayerBanned);
+        }
 
         let mut stats: PlayerStats = env
             .storage()
@@ -293,6 +298,9 @@ impl LeaderboardContract {
             return Err(LeaderboardError::UnauthorizedCaller);
         }
         caller.require_auth();
+        if Self::is_banned_internal(&env, &user) {
+            return Err(LeaderboardError::PlayerBanned);
+        }
 
         let mut stats: PlayerStats = env
             .storage()
@@ -413,6 +421,55 @@ impl LeaderboardContract {
             .instance()
             .get(&DataKey::MinSlot)
             .unwrap_or(0)
+    }
+
+    /// Permanently exclude a player from point awards and the leaderboard.
+    /// Existing points are reset so an unban never restores a fraudulent rank.
+    pub fn ban_player(env: Env, admin: Address, user: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().set(&DataKey::Banned(user.clone()), &true);
+        Self::set_points_internal(&env, user, 0);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Allow a previously banned player to receive new awards. Their points
+    /// remain zero until a trusted caller awards them again.
+    pub fn unban_player(env: Env, admin: Address, user: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().persistent().remove(&DataKey::Banned(user));
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Remove a player from the visible top list without changing their
+    /// historical points. This is useful for moderation pending investigation.
+    pub fn remove_player(env: Env, admin: Address, user: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        Self::remove_from_top_players(&env, &user);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Correct a player's score, including resetting it to zero. The top-list
+    /// reverse indexes and minimum cache are rebuilt as part of the update.
+    pub fn set_player_points(
+        env: Env,
+        admin: Address,
+        user: Address,
+        points: u64,
+    ) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+        if points > 0 && Self::is_banned_internal(&env, &user) {
+            return Err(LeaderboardError::PlayerBanned);
+        }
+        Self::set_points_internal(&env, user, points);
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn is_banned(env: Env, user: Address) -> bool {
+        Self::is_banned_internal(&env, &user)
     }
 
     // ── Internal: maintain a persistent sorted top list ──────────────────────
@@ -684,6 +741,95 @@ impl LeaderboardContract {
             &Symbol::new(env, "mint"),
             vec![env, this.into_val(env), user.into_val(env), amount.into_val(env)],
         );
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), LeaderboardError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(LeaderboardError::NotInitialized)?;
+        if *admin != stored {
+            return Err(LeaderboardError::NotAdmin);
+        }
+        admin.require_auth();
+        Ok(())
+    }
+
+    fn is_banned_internal(env: &Env, user: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Banned(user.clone()))
+            .unwrap_or(false)
+    }
+
+    fn set_points_internal(env: &Env, user: Address, points: u64) {
+        let mut stats: PlayerStats = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Stats(user.clone()))
+            .unwrap_or(PlayerStats {
+                points: 0,
+                total_bets: 0,
+                won_bets: 0,
+                lost_bets: 0,
+            });
+        stats.points = points;
+        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
+        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
+
+        // Point corrections can move a player in either direction. Removing
+        // first, then reinserting, refreshes the affected slot lookups and min.
+        Self::remove_from_top_players(env, &user);
+        if points > 0 {
+            Self::update_top_players(env, user, points);
+        }
+    }
+
+    fn remove_from_top_players(env: &Env, user: &Address) {
+        let Some(slot) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::TopPlayerSlot(user.clone()))
+        else {
+            return;
+        };
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TopPlayerCount)
+            .unwrap_or(0);
+        if count == 0 || slot >= count {
+            env.storage().persistent().remove(&DataKey::TopPlayerSlot(user.clone()));
+            return;
+        }
+
+        env.storage().persistent().remove(&DataKey::TopPlayerSlot(user.clone()));
+        for current in slot..(count - 1) {
+            let next: PlayerEntry = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TopPlayerAt(current + 1))
+                .unwrap();
+            env.storage().persistent().set(&DataKey::TopPlayerAt(current), &next);
+            env.storage().persistent().set(&DataKey::TopPlayerSlot(next.address.clone()), &current);
+            env.storage().persistent().extend_ttl(&DataKey::TopPlayerAt(current), TTL_BUMP, TTL_HIGH);
+        }
+        env.storage().persistent().remove(&DataKey::TopPlayerAt(count - 1));
+        let new_count = count - 1;
+        env.storage().instance().set(&DataKey::TopPlayerCount, &new_count);
+        if new_count == 0 {
+            env.storage().instance().set(&DataKey::MinPoints, &0_u64);
+            env.storage().instance().set(&DataKey::MinSlot, &0_u32);
+        } else {
+            let min_slot = new_count - 1;
+            let min_entry: PlayerEntry = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TopPlayerAt(min_slot))
+                .unwrap();
+            env.storage().instance().set(&DataKey::MinPoints, &min_entry.points);
+            env.storage().instance().set(&DataKey::MinSlot, &min_slot);
     }
 }
 

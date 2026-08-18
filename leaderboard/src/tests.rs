@@ -297,6 +297,72 @@ fn test_bottom_player_rising_updates_min() {
 // ── Lever G: reward() / reward_bonus() ────────────────────────────────────────
 
 #[test]
+fn test_admin_can_remove_player_and_refresh_leaderboard_cache() {
+    let (env, client, admin, market, _referral) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+    client.add_pts(&market, &alice, &100_u64, &true);
+    client.add_pts(&market, &bob, &80_u64, &true);
+    client.add_pts(&market, &charlie, &60_u64, &true);
+    client.remove_player(&admin, &bob);
+
+    let top = client.get_top_players(&0_u32, &20_u32);
+    assert_eq!(top.len(), 2);
+    assert_eq!(top.get(0).unwrap().address, alice);
+    assert_eq!(top.get(1).unwrap().address, charlie);
+    assert_eq!(client.get_min_points(), 60);
+    assert_eq!(client.get_min_slot(), 1);
+}
+
+#[test]
+fn test_admin_can_reset_points_and_reorder_player() {
+    let (env, client, admin, market, _referral) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_pts(&market, &alice, &100_u64, &true);
+    client.add_pts(&market, &bob, &80_u64, &true);
+    client.set_player_points(&admin, &alice, &50_u64);
+
+    let top = client.get_top_players(&0_u32, &20_u32);
+    assert_eq!(top.get(0).unwrap().address, bob);
+    assert_eq!(top.get(1).unwrap().address, alice);
+    assert_eq!(top.get(1).unwrap().points, 50);
+    assert_eq!(client.get_min_points(), 50);
+}
+
+#[test]
+fn test_ban_resets_points_removes_rank_and_blocks_future_awards() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    client.add_pts(&market, &user, &100_u64, &true);
+    client.ban_player(&admin, &user);
+
+    assert!(client.is_banned(&user));
+    assert_eq!(client.get_points(&user), 0);
+    assert_eq!(client.get_top_player_count(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_banned_player_cannot_receive_future_awards() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    client.ban_player(&admin, &user);
+    client.add_pts(&market, &user, &10_u64, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_only_admin_can_moderate_players() {
+    let (env, client, _admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    client.add_pts(&market, &user, &100_u64, &true);
+    client.ban_player(&attacker, &user);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #3)")]
 fn test_reward_rejects_non_market_caller() {
     // Only the market contract may call reward(). A random caller must be
