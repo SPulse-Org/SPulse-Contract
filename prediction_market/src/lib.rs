@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Error, IntoVal, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -23,6 +23,18 @@ const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
 const WIN_TOKENS: i128 = 10_0000000;
 const LOSE_TOKENS: i128 = 2_0000000;
+
+// ── Interface versioning (upgrade coordination) ──────────────────────────────
+// INTERFACE_VERSION identifies the ABI this contract exposes to the other
+// contracts it interoperates with. It MUST be bumped in the source AND
+// committed to storage via set_interface_version() whenever any function
+// another contract calls changes incompatibly, so downstream callers can
+// fail closed instead of executing against a mismatched ABI.
+const INTERFACE_VERSION: u32 = 1;
+// Minimum interface versions required from each dependency before this
+// contract will invoke a cross-contract function (fail closed otherwise).
+const REFERRAL_CREDIT_INTERFACE_VERSION: u32 = 1;
+const LEADERBOARD_REWARD_INTERFACE_VERSION: u32 = 1;
 
 // Withdrawal safety (issue #12): a single payout is capped and the non-admin
 // path is timelocked, so a compromised fee recipient cannot drain the whole
@@ -65,6 +77,19 @@ pub enum MarketError {
     WithdrawalRequestExists = 23,
     NoWithdrawalRequest = 24,
     WithdrawalTooSoon = 25,
+    // ── Interface versioning (upgrade coordination) ────────────────────────
+    // The target contract does not expose the interface_version() function,
+    // so its ABI cannot be verified before calling into it.
+    InterfaceVersionMissing = 26,
+    // The target contract's interface version is below the minimum this
+    // contract requires for the function it is about to invoke.
+    IncompatibleInterface = 27,
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // A trusted dependency (referral / leaderboard) was revoked by the admin;
+    // every operation that depends on that role fails closed until restore.
+    TrustRevoked = 28,
+    // revoke_trust/restore_trust was called with an unknown role symbol.
+    InvalidRole = 29,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -88,6 +113,12 @@ pub enum DataKey {
     Payout(u64, Address), // i128 — exact payout computed at resolve time
     // ── Timelocked withdrawal requests (issue #12) ───────────────────────
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
+    // ── Interface versioning (upgrade coordination) ───────────────────────
+    InterfaceVersion, // u32 — current interface version of this contract
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Persistent flag (true) meaning the trusted dependency for `role` is
+    // revoked. Absent key == trusted/enabled.
+    TrustRevoked(Symbol),
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -194,6 +225,9 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
     }
 
@@ -237,6 +271,115 @@ impl PredictionMarketContract {
     /// Read the current Config (for verification/admin tooling).
     pub fn get_config(env: Env) -> Config {
         env.storage().instance().get(&DataKey::Cfg).unwrap()
+    }
+
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // The market trusts two external dependencies: the referral registry
+    // (set at initialize "referral_contract") and the leaderboard (set at
+    // initialize "leaderboard_contract"). Each is tracked as a role the admin
+    // can revoke to sever the trust relationship immediately — every function
+    // that depends on the role then fails closed with TrustRevoked. A role is
+    // re-enabled ONLY by an explicit restore_trust call; re-pointing cfg via
+    // set_config does NOT clear a revocation, so a rushed re-config cannot
+    // silently bypass an emergency revocation.
+
+    /// Revoke trust in the dependency bound to `role`. Admin only.
+    ///
+    /// Roles: "referral", "leaderboard". After revocation, place_bet (referral)
+    /// and claim (leaderboard) fail closed with `TrustRevoked` until the admin
+    /// explicitly calls `restore_trust`.
+    pub fn revoke_trust(env: Env, admin: Address, role: Symbol) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(MarketError::InvalidRole);
+        }
+        let key = DataKey::TrustRevoked(role);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Restore trust in the dependency bound to `role`. Admin only.
+    ///
+    /// Clears a prior `revoke_trust`. This is the ONLY way to re-enable a
+    /// revoked role; set_config re-pointing does not remove the revocation.
+    pub fn restore_trust(env: Env, admin: Address, role: Symbol) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(MarketError::InvalidRole);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustRevoked(role));
+        Ok(())
+    }
+
+    /// Read-only trust status for `role` (true == revoked). Never panics,
+    /// never requires admin — usable by anyone to observe revocation state.
+    pub fn is_trust_revoked(env: Env, role: Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+    }
+
+    fn is_known_role(env: &Env, role: &Symbol) -> bool {
+        *role == Symbol::new(env, "referral") || *role == Symbol::new(env, "leaderboard")
+    }
+
+    fn require_trust_not_revoked(env: &Env, role: Symbol) -> Result<(), MarketError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+        {
+            return Err(MarketError::TrustRevoked);
+        }
+        Ok(())
+    }
+
+    // ── Interface Versioning (upgrade coordination) ──────────────────────
+    // Every contract that participates in cross-contract calls exposes a
+    // stable interface version. Callers read it and refuse to invoke a
+    // dependency whose version is below the minimum they require.
+
+    /// Read this contract's current interface version.
+    ///
+    /// `0` means the contract has no declared version (a legacy deployment
+    /// that was never migrated via `set_interface_version`, or an
+    /// uninitialized contract). Callers treat `0` as incompatible with any
+    /// positive requirement — this is the fail-closed behavior for
+    /// uncoordinated deployments.
+    pub fn interface_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InterfaceVersion)
+            .unwrap_or(0)
+    }
+
+    /// Declare this contract's interface version. Admin only.
+    ///
+    /// Required after an in-place WASM upgrade that changes any ABI another
+    /// contract calls: bump `INTERFACE_VERSION` in the new source and commit
+    /// the new value here. Until this is done, upgraded callers that require
+    /// the newer version will fail closed with `IncompatibleInterface` instead
+    /// of silently executing against an uncoordinated ABI.
+    pub fn set_interface_version(
+        env: Env,
+        admin: Address,
+        version: u32,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &version);
+        Ok(())
     }
 
     // ── Resolver Management ───────────────────────────────────────────────
@@ -414,12 +557,26 @@ impl PredictionMarketContract {
         acc_fees += platform_fee;
 
         // ── Referral (skip if cached no-referrer) ─────────────────────────
+        // Issue #40: a revoked referral dependency fails the entire bet — we
+        // must not place a bet that silently skips the (revoked) referral fee
+        // routing the protocol depends on. Restore requires an explicit admin
+        // restore_trust call.
+        Self::require_trust_not_revoked(&env, symbol_short!("referral"))?;
+
         let hr_key = DataKey::HasReferrer(user.clone());
         let cached: Option<bool> = env.storage().persistent().get(&hr_key);
 
         let paid_referrer = if cached == Some(false) {
             false
         } else {
+            // Upgrade coordination: verify the referral registry exposes a
+            // compatible `credit` interface before transferring or invoking.
+            // Fails closed (IncompatibleInterface/InterfaceVersionMissing).
+            Self::require_interface_version(
+                &env,
+                &cfg.referral,
+                REFERRAL_CREDIT_INTERFACE_VERSION,
+            )?;
             xlm.transfer(&this, &cfg.referral, &referral_fee);
             let result: bool = env.invoke_contract(
                 &cfg.referral,
@@ -554,17 +711,42 @@ impl PredictionMarketContract {
                 .persistent()
                 .get(&DataKey::BettorCount(market_id))
                 .unwrap_or(0);
+            // Read-time TTL refresh (issue #9): the bettor index, the bet
+            // entries, and the payouts derived from them must all stay alive
+            // together. A long-lived market could otherwise see its index
+            // expire before resolution, silently dropping bettors from the
+            // enumeration and locking their stake in the pool. BettorCount is
+            // lazily written on the first bet, so only bump it when present.
+            if bettors > 0 {
+                env.storage().persistent().extend_ttl(
+                    &DataKey::BettorCount(market_id),
+                    TTL_BUMP,
+                    TTL_HIGH,
+                );
+            }
 
             for i in 0..bettors {
                 let slot_key = DataKey::BettorAt(market_id, i);
-                let bettor: Address =
-                    if let Some(a) = env.storage().persistent().get(&slot_key) {
-                        a
-                    } else {
-                        continue;
-                    };
+                let bettor: Address = if let Some(a) = env.storage().persistent().get(&slot_key) {
+                    // Keep the index slot alive while we walk it.
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot_key, TTL_BUMP, TTL_HIGH);
+                    a
+                } else {
+                    continue;
+                };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
-                if let Some(entry) = env.storage().persistent().get::<DataKey, BetEntry>(&bet_key) {
+                if let Some(entry) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, BetEntry>(&bet_key)
+                {
+                    // Keep the bet alive so the winner can later claim against
+                    // it (claim reads the same Bet + Payout pair).
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
                     if entry.is_yes == outcome {
                         let payout = (entry.net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
@@ -708,12 +890,27 @@ impl PredictionMarketContract {
         }
 
         let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
         let winning_side = if market.outcome {
             market.total_yes
         } else {
             market.total_no
         };
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        // Issue #40: a revoked leaderboard dependency fails the entire claim —
+        // the reward (points + PULSE mint) is part of what claim() must deliver,
+        // so we fail closed instead of paying out XLM with no reward.
+        Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
+        // Upgrade coordination: verify the leaderboard exposes a compatible
+        // `reward` interface BEFORE any local state changes or external calls,
+        // so a unilateral incompatible upgrade fails the whole claim atomically
+        // instead of marking the bet claimed and then failing mid-way.
+        Self::require_interface_version(
+            &env,
+            &cfg.leaderboard,
+            LEADERBOARD_REWARD_INTERFACE_VERSION,
+        )?;
+        let this = env.current_contract_address();
 
         // SECURITY: mark claimed BEFORE any external calls.
         entry.claimed = true;
@@ -723,26 +920,29 @@ impl PredictionMarketContract {
             .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
         // Read-time TTL refresh (issue #9): a claim must not be able to observe
         // an expired market/bet record — keep the market entry alive here too
-        // so late claims on a long-lived market keep working.
+        // so late claims on a long-lived market keep working. The Payout key
+        // is the XLM source for a winner, so it must stay alive as long as the
+        // bet that pays against it: bump all three together. Losers have no
+        // Payout key (the host errors on extending a non-existent key), so
+        // guard the payout bump with has().
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
-
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
-        let this = env.current_contract_address();
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        if env.storage().persistent().has(&payout_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&payout_key, TTL_BUMP, TTL_HIGH);
+        }
 
         // XLM payout straight from the settlement-time payout ledger.
         // Winners are exactly the bettors who own a Payout entry; everyone
         // else (losers, empty winning side) has no payout key at all.
-        let payout: i128 = if let Some(p) = env
+        let payout: i128 = env
             .storage()
             .persistent()
-            .get::<DataKey, i128>(&DataKey::Payout(market_id, user.clone()))
-        {
-            p
-        } else {
-            0
-        };
+            .get::<DataKey, i128>(&payout_key)
+            .unwrap_or_default();
         if is_winner && payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
@@ -756,6 +956,8 @@ impl PredictionMarketContract {
             (LOSE_POINTS, LOSE_TOKENS)
         };
 
+        // Upgrade coordination: the leaderboard was already verified to expose
+        // a compatible `reward` interface before the bet was marked claimed.
         let _: Val = env.invoke_contract(
             &cfg.leaderboard,
             &Symbol::new(&env, "reward"),
@@ -923,16 +1125,26 @@ impl PredictionMarketContract {
     // ── View Functions ────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, MarketError> {
-        Self::load_market(&env, market_id)
+        let market = Self::load_market(&env, market_id)?;
+        // Read-time TTL refresh (issue #9): viewing a market is a user
+        // interaction that keeps the market entry claimable — as long as
+        // anyone is still interacting with the market, late claims/refunds
+        // against it remain possible.
+        Self::bump_ttl(&env, &DataKey::Market(market_id));
+        Ok(market)
     }
 
     // OPT: returns Bet (ABI-compatible) derived from BetEntry
     pub fn get_bet(env: Env, market_id: u64, user: Address) -> Result<Bet, MarketError> {
+        let bet_key = DataKey::Bet(market_id, user.clone());
         let e: BetEntry = env
             .storage()
             .persistent()
-            .get(&DataKey::Bet(market_id, user))
+            .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
+        // Read-time TTL refresh (issue #9): a user checking their bet is the
+        // key interaction that keeps their claimable entry alive.
+        Self::bump_ttl(&env, &bet_key);
         Ok(Bet {
             amount: e.net,
             is_yes: e.is_yes,
@@ -970,15 +1182,23 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::BettorCount(market_id))
             .unwrap_or(0);
+        // Read-time TTL refresh (issue #9): enumerating the bettor index is the
+        // interaction that keeps the index alive for later resolution — keep
+        // the entries claimable for as long as anyone is still querying them.
+        if count > 0 {
+            Self::bump_ttl(&env, &DataKey::BettorCount(market_id));
+        }
         let page_limit = limit.min(MAX_BETTORS_PER_PAGE);
         let end = start.saturating_add(page_limit).min(count);
         let mut result: Vec<Address> = Vec::new(&env);
         for i in start..end {
+            let slot_key = DataKey::BettorAt(market_id, i);
             if let Some(addr) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Address>(&DataKey::BettorAt(market_id, i))
+                .get::<DataKey, Address>(&slot_key)
             {
+                Self::bump_ttl(&env, &slot_key);
                 result.push_back(addr);
             }
         }
@@ -1006,10 +1226,19 @@ impl PredictionMarketContract {
     }
 
     pub fn get_payout(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        let payout = env
+            .storage()
             .persistent()
-            .get(&DataKey::Payout(market_id, user))
-            .unwrap_or(0)
+            .get::<DataKey, i128>(&payout_key)
+            .unwrap_or(0);
+        // Read-time TTL refresh (issue #9): a winner checking their payout keeps
+        // the payout entry alive for a later claim. Only present for winners,
+        // so bump only when the key exists.
+        if env.storage().persistent().has(&payout_key) {
+            Self::bump_ttl(&env, &payout_key);
+        }
+        payout
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
@@ -1036,6 +1265,48 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::Market(market_id))
             .ok_or(MarketError::MarketNotFound)
+    }
+
+    /// Read-time TTL refresh for persistent entries that must stay alive while
+    /// they remain claimable (issue #9). Re-arms the key's expiry window so a
+    /// user who interacts before the current TTL lapses keeps their claimable
+    /// state (and any later claim/refund against it) recoverable.
+    ///
+    /// Callers MUST only invoke this on keys they have already confirmed to
+    /// exist: the host errors ("trying to extend invalid entry") when asked to
+    /// extend a deleted or never-written key, and an already-expired entry
+    /// cannot be resurrected by design (issue #9 documents this limitation).
+    #[inline]
+    fn bump_ttl(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_BUMP, TTL_HIGH);
+    }
+
+    // ── Interface versioning helpers (upgrade coordination) ──────────────
+    // Reads `interface_version()` on the target contract and fails closed with
+    // a typed error when the target does not expose the function
+    // (InterfaceVersionMissing) or reports a version below the required
+    // minimum (IncompatibleInterface). Uses try_invoke_contract so a missing
+    // function or panicking target is caught deterministically instead of
+    // aborting with a generic host panic.
+    fn require_interface_version(
+        env: &Env,
+        target: &Address,
+        required: u32,
+    ) -> Result<(), MarketError> {
+        let version: u32 = match env.try_invoke_contract::<u32, Error>(
+            target,
+            &Symbol::new(env, "interface_version"),
+            vec![&env],
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) | Err(_) => return Err(MarketError::InterfaceVersionMissing),
+        };
+        if version < required {
+            return Err(MarketError::IncompatibleInterface);
+        }
+        Ok(())
     }
 
     #[inline]
@@ -1129,9 +1400,9 @@ impl PredictionMarketContract {
             .unwrap_or((now, 0));
 
         // A timestamp regression must remain in the existing window. Using
-        // checked subtraction prevents underflow from resetting the limit and
-        // allowing an extra burst of market creations.
-        let elapsed = now.checked_sub(ws).unwrap_or(0);
+        // saturating subtraction prevents underflow from resetting the limit
+        // and allowing an extra burst of market creations.
+        let elapsed = now.saturating_sub(ws);
         let (new_ws, new_cnt) = if elapsed < 3600 {
             if cnt >= MAX_MARKETS_PER_HOUR {
                 return Err(MarketError::RateLimitExceeded);

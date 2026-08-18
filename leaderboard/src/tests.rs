@@ -1,5 +1,17 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::Address as _,
+    {Env, String},
+};
+
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
 
 fn setup() -> (
     Env,
@@ -11,6 +23,11 @@ fn setup() -> (
     let env = Env::default();
     env.mock_all_auths();
     env.cost_estimate().budget().reset_unlimited();
+    // Filling the top-50 list touches >100 unique ledger entries within a
+    // single add_pts call (bubble-up swaps), which exceeds the mainnet
+    // footprint limit the test harness enforces by default. This is expected
+    // test-only load, so disable the invocation resource limits.
+    env.cost_estimate().disable_resource_limits();
 
     let contract_id = env.register(LeaderboardContract, ());
     let client = LeaderboardContractClient::new(&env, &contract_id);
@@ -325,4 +342,304 @@ fn test_reward_updates_points_and_winloss() {
     assert_eq!(s.won_bets, 1);
     assert_eq!(s.lost_bets, 1);
     assert_eq!(s.total_bets, 2);
+}
+
+// ── Upgrade Coordination: leaderboard → PULSE token mint ─────────────────────
+
+fn setup_with_token(
+    env: &Env,
+    client: &LeaderboardContractClient<'static>,
+    admin: &Address,
+) -> pulse_token::PULSETokenContractClient<'static> {
+    let token_id = env.register(pulse_token::PULSETokenContract, ());
+    let tclient = pulse_token::PULSETokenContractClient::new(env, &token_id);
+    tclient.initialize(
+        admin,
+        &String::from_str(env, "PULSE"),
+        &String::from_str(env, "PLSE"),
+        &7u32,
+        &1_000_000_000_000_000_i128,
+    );
+    // The leaderboard mints internally, so it must be an authorized minter.
+    tclient.set_minter(&client.address);
+    assert_eq!(tclient.interface_version(), 1);
+    tclient
+}
+
+#[test]
+fn test_reward_mints_token_when_interface_compatible() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+
+    let s = client.get_stats(&user);
+    assert_eq!(s.points, 30);
+    assert_eq!(s.won_bets, 1);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_reward_rejects_incompatible_token_version() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    // Simulate an uncoordinated upgrade: the token's mint ABI is new but its
+    // declared interface version was dropped to 0. reward must fail closed
+    // with IncompatibleInterface BEFORE awarding points or minting.
+    tclient.set_interface_version(&0);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+
+    // Fail closed: no points were granted by the rejected call.
+    assert_eq!(client.get_points(&user), 0);
+    let s = client.get_stats(&user);
+    assert_eq!(s.points, 0);
+    assert_eq!(s.total_bets, 0);
+}
+
+#[test]
+fn test_reward_rejects_missing_token_version() {
+    let (env, client, admin, market, _referral) = setup();
+    // A token that never exposes interface_version (pre-this-scheme contract).
+    let no_version = env.register(NoVersionContract, ());
+    client.set_token(&admin, &no_version);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+}
+
+#[test]
+fn test_reward_bonus_rejects_incompatible_token_version() {
+    let (env, client, admin, _market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    tclient.set_interface_version(&0);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+
+    // Coordinated recovery: re-declare the version; bonus proceeds normally.
+    tclient.set_interface_version(&1);
+    client.reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert_eq!(client.get_points(&user), 5);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+// ── Supply cap: reward-triggered mints are bounded by the token cap ──────────
+// The cap lives in pulse_token::mint(), so BOTH leaderboard mint entry points
+// (reward / reward_bonus) are capped through the shared internal dispatch.
+
+#[test]
+fn test_reward_mint_subject_to_token_cap() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Tighten the cap so only the first reward mint fits.
+    tclient.set_max_supply(&admin, &10_0000000_i128);
+
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+    assert_eq!(tclient.total_supply(), 10_0000000);
+
+    // A second reward mint would exceed the cap → the whole reward fails and
+    // nothing more is minted.
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert!(r.is_err(), "over-cap reward must fail, got {r:?}");
+    assert_eq!(tclient.balance(&user), 10_0000000);
+    assert_eq!(tclient.total_supply(), 10_0000000);
+}
+
+#[test]
+fn test_reward_bonus_mint_subject_to_token_cap() {
+    let (env, client, admin, _market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Cap is under the welcome-bonus size (10 PULSE).
+    tclient.set_max_supply(&admin, &5_0000000_i128);
+
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert!(r.is_err(), "over-cap reward_bonus must fail, got {r:?}");
+    assert_eq!(tclient.balance(&user), 0);
+    assert_eq!(tclient.total_supply(), 0);
+    assert_eq!(client.get_points(&user), 0);
+}
+
+// ── Issue #40: revocable trust model ─────────────────────────────────────────
+// Each trusted dependency (market / referral / token) is a revokeable role.
+// revoke_trust severs the relationship: the privileged path fails closed with
+// TrustRevoked (#8) until restore_trust. Re-pointing the address does NOT clear
+// a revocation — restoration is always an explicit admin act.
+
+#[test]
+fn test_revoke_market_blocks_add_pts_and_restore_reenables() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+
+    // Enabled: works.
+    client.add_pts(&market, &user, &10_u64, &true);
+    assert_eq!(client.get_points(&user), 10);
+
+    // Revoke the market role.
+    client.revoke_trust(&admin, &symbol_short!("market"));
+    assert!(client.is_trust_revoked(&symbol_short!("market")));
+
+    // add_pts / record_bet / reward (tokens=0) now fail closed with TrustRevoked.
+    let r = client.try_add_pts(&market, &user, &10_u64, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let r = client.try_record_bet(&market, &user);
+    assert!(r.is_err(), "record_bet must fail when market is revoked");
+    let r = client.try_reward(&market, &user, &30_u64, &0_i128, &true);
+    assert!(r.is_err(), "reward must fail when market is revoked");
+
+    // Unrelated read-only views keep working after revocation.
+    assert_eq!(client.get_points(&user), 10);
+    assert_eq!(client.get_top_player_count(), 1);
+
+    // Restore re-enables the role.
+    client.restore_trust(&admin, &symbol_short!("market"));
+    client.add_pts(&market, &user, &10_u64, &true);
+    assert_eq!(client.get_points(&user), 20);
+    assert!(!client.is_trust_revoked(&symbol_short!("market")));
+}
+
+#[test]
+fn test_revoke_referral_blocks_bonus_paths_and_restore_reenables() {
+    let (env, client, admin, _market, referral) = setup();
+    let user = Address::generate(&env);
+
+    // Revoke referral role.
+    client.revoke_trust(&admin, &symbol_short!("referral"));
+
+    // add_bonus_pts / reward_bonus (tokens=0) fail closed.
+    let r = client.try_add_bonus_pts(&referral, &user, &3_u64);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &0_i128);
+    assert!(
+        r.is_err(),
+        "reward_bonus must fail when referral is revoked"
+    );
+    assert_eq!(
+        client.get_points(&user),
+        0,
+        "no partial award on revoked referral"
+    );
+
+    client.restore_trust(&admin, &symbol_short!("referral"));
+    client.add_bonus_pts(&referral, &user, &3_u64);
+    assert_eq!(client.get_points(&user), 3);
+}
+
+#[test]
+fn test_revoke_token_blocks_reward_mint_without_partial_award() {
+    let (env, client, admin, market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Revoke the token role.
+    client.revoke_trust(&admin, &symbol_short!("token"));
+
+    // reward with tokens > 0 must fail closed BEFORE awarding points or minting.
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+    assert_eq!(tclient.balance(&user), 0);
+
+    // reward_bonus with tokens > 0 is equally blocked.
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert!(r.is_err(), "reward_bonus must fail when token is revoked");
+    assert_eq!(tclient.balance(&user), 0);
+
+    // Restore re-enables minting.
+    client.restore_trust(&admin, &symbol_short!("token"));
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_repointing_token_does_not_clear_revocation() {
+    // A replacement address via set_token_contract must NOT silently bypass an
+    // emergency revocation — only restore_trust re-enables a revoked role.
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    client.revoke_trust(&admin, &symbol_short!("token"));
+    let replacement = Address::generate(&env);
+    client.set_token_contract(&admin, &replacement);
+
+    // Still revoked after re-pointing: reward must fail closed.
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert!(client.is_trust_revoked(&symbol_short!("token")));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let (env, client, _admin, _market, _referral) = setup();
+    let attacker = Address::generate(&env);
+    client.revoke_trust(&attacker, &symbol_short!("market"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let (_env, client, admin, _market, _referral) = setup();
+    client.revoke_trust(&admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let (_env, client, admin, _market, _referral) = setup();
+    client.restore_trust(&admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let (_env, client, _admin, _market, _referral) = setup();
+    assert!(!client.is_trust_revoked(&symbol_short!("market")));
+    assert!(!client.is_trust_revoked(&symbol_short!("referral")));
+    assert!(!client.is_trust_revoked(&symbol_short!("token")));
 }

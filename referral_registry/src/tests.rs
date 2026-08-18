@@ -1,5 +1,6 @@
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl, symbol_short,
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -8,6 +9,16 @@ use soroban_sdk::{
 // Import sibling contracts for inter-contract testing
 use leaderboard::LeaderboardContract;
 use pulse_token::PULSETokenContract;
+
+// Dummy contract with no interface_version getter — simulates a contract
+// deployed before the versioning scheme existed.
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
 
 // ── Test Helpers ──────────────────────────────────────────────────────────────
 
@@ -38,6 +49,7 @@ fn setup() -> TestSetup {
         &String::from_str(&env, "PULSE"),
         &String::from_str(&env, "PLSE"),
         &7u32,
+        &1_000_000_000_000_000_i128,
     );
 
     // Deploy Leaderboard
@@ -430,4 +442,273 @@ fn test_legacy_user_without_referrer() {
     assert!(s.client.is_registered(&legacy_user));
     assert_eq!(s.client.get_referrer(&legacy_user), None);
     assert!(!s.client.has_referrer(&legacy_user));
+}
+
+// ── Upgrade Coordination: referral → leaderboard reward_bonus / add_bonus_pts ─
+
+fn leaderboard_client(t: &TestSetup) -> leaderboard::LeaderboardContractClient<'static> {
+    leaderboard::LeaderboardContractClient::new(&t.env, &t.leaderboard_id)
+}
+
+#[test]
+fn test_register_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let lb = leaderboard_client(&t);
+    lb.set_interface_version(&t.admin, &0); // uncoordinated downgrade
+
+    let user = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&user, &String::from_str(&t.env, "NewUser"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    // Fail closed: registration must NOT be recorded by the rejected call.
+    assert!(!t.client.is_registered(&user));
+
+    // Coordinated recovery: re-declare the version, registration proceeds.
+    lb.set_interface_version(&t.admin, &1);
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, "NewUser"), &None);
+    assert!(t.client.is_registered(&user));
+    assert_eq!(lb.get_points(&user), 5);
+}
+
+#[test]
+fn test_register_rejects_missing_leaderboard_version() {
+    let t = setup();
+    // Leaderboard never exposed interface_version (pre-this-scheme contract).
+    let no_version = t.env.register(NoVersionContract, ());
+    t.env.as_contract(&t.referral_id, || {
+        t.env
+            .storage()
+            .instance()
+            .set(&DataKey::LeaderboardContract, &no_version);
+    });
+
+    let user = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&user, &String::from_str(&t.env, "Solo"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    assert!(!t.client.is_registered(&user));
+}
+
+#[test]
+fn test_credit_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    let lb = leaderboard_client(&t);
+    lb.set_interface_version(&t.admin, &0); // uncoordinated downgrade
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    // Fail closed BEFORE the fee transfer: the referrer must have been paid
+    // nothing on the rejected call.
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Coordinated recovery: credit proceeds and pays the referrer.
+    lb.set_interface_version(&t.admin, &1);
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+fn test_credit_rejects_missing_leaderboard_version() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    let no_version = t.env.register(NoVersionContract, ());
+    t.env.as_contract(&t.referral_id, || {
+        t.env
+            .storage()
+            .instance()
+            .set(&DataKey::LeaderboardContract, &no_version);
+    });
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    // Fail closed BEFORE the fee transfer.
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+}
+
+// ── Issue #40: revocable trust model ─────────────────────────────────────────
+// referral_registry trusts the market (credit caller), the leaderboard
+// (reward_bonus / add_bonus_pts) and the XLM SAC (fee payouts). revoke_trust
+// severs the relationship: dependent calls fail closed with TrustRevoked (#9)
+// until restore_trust.
+
+#[test]
+fn test_revoke_market_blocks_credit_and_restore_reenables() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    // Revoke market role.
+    t.client.revoke_trust(&t.admin, &symbol_short!("market"));
+    assert!(t.client.is_trust_revoked(&symbol_short!("market")));
+
+    // credit fails closed before paying the referrer.
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+    assert_eq!(t.client.get_earnings(&referrer), 0);
+
+    // Restore re-enables credit.
+    t.client.restore_trust(&t.admin, &symbol_short!("market"));
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+fn test_revoke_leaderboard_blocks_register_and_credit() {
+    let t = setup();
+
+    // Register a user WITH a referrer while the leaderboard is still trusted.
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    // Revoke leaderboard role.
+    t.client
+        .revoke_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+
+    // A NEW registration fails closed with no profile written.
+    let late = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&late, &String::from_str(&t.env, "Solo"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert!(!t.client.is_registered(&late));
+
+    // credit that would award the referrer the leaderboard bonus also fails
+    // closed BEFORE the fee transfer.
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Restore re-enables registration.
+    t.client
+        .restore_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+    t.client
+        .register_referral(&late, &String::from_str(&t.env, "Solo"), &None);
+    assert!(t.client.is_registered(&late));
+}
+
+#[test]
+fn test_revoke_xlm_sac_blocks_credit_payout() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    // Revoke the XLM SAC role — no fee payout may move through it.
+    t.client.revoke_trust(&t.admin, &symbol_short!("xlm_sac"));
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Restore re-enables the payout.
+    t.client.restore_trust(&t.admin, &symbol_short!("xlm_sac"));
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.client.revoke_trust(&attacker, &symbol_short!("market"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.revoke_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.restore_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let t = setup();
+    assert!(!t.client.is_trust_revoked(&symbol_short!("market")));
+    assert!(!t
+        .client
+        .is_trust_revoked(&Symbol::new(&t.env, "leaderboard")));
+    assert!(!t.client.is_trust_revoked(&symbol_short!("token")));
+    assert!(!t.client.is_trust_revoked(&symbol_short!("xlm_sac")));
 }

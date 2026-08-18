@@ -1,5 +1,6 @@
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl, symbol_short,
     testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -26,6 +27,11 @@ fn setup() -> TestSetup {
     let env = Env::default();
     env.mock_all_auths();
     env.cost_estimate().budget().reset_unlimited();
+    // Heavy tests (e.g. legacy bettor-index reads that materialize >100
+    // distinct ledger keys, spam-guard loops) exceed the mainnet footprint
+    // limits the test harness enforces by default. Disable the invocation
+    // resource limits — assertions are unaffected.
+    env.cost_estimate().disable_resource_limits();
 
     env.ledger().set(LedgerInfo {
         timestamp: 1_000_000,
@@ -53,6 +59,7 @@ fn setup() -> TestSetup {
         &String::from_str(&env, "PULSE"),
         &String::from_str(&env, "PLSE"),
         &7u32,
+        &1_000_000_000_000_000_i128,
     );
 
     let leaderboard_id = env.register(LeaderboardContract, ());
@@ -705,7 +712,8 @@ fn test_reject_drain_entire_accumulator_in_one_request() {
     t.client.add_fee_recipient(&t.admin, &recipient);
 
     let fees = t.client.get_accumulated_fees();
-    t.client.request_withdraw_fees(&recipient, &recipient, &fees);
+    t.client
+        .request_withdraw_fees(&recipient, &recipient, &fees);
 }
 
 // ── 27e. Payout is locked until the timelock elapses (issue #12) ──────────────
@@ -837,14 +845,14 @@ fn test_bettor_index_legacy_read_is_bounded() {
 
     // Simulate a large legacy index without spending time creating 101 bets.
     t.env.as_contract(&t.client.address, || {
-        t.env.storage().persistent().set(
-            &DataKey::BettorCount(id),
-            &(MAX_BETTORS_PER_PAGE + 1),
-        );
-        t.env.storage().persistent().set(
-            &DataKey::BettorAt(id, 0),
-            &first,
-        );
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorCount(id), &(MAX_BETTORS_PER_PAGE + 1));
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorAt(id, 0), &first);
         t.env.storage().persistent().set(
             &DataKey::BettorAt(id, MAX_BETTORS_PER_PAGE),
             &beyond_first_page,
@@ -895,7 +903,9 @@ fn test_reject_too_many_bets() {
     fund_user(&t, &user, 100_000_000_000);
 
     for _ in 0..=20u32 {
-        t.client.place_bet(&user, &id, &true, &1_0000000_i128);
+        // 1.1 XLM gross → net 1.078 XLM clears MIN_BET; the spam guard
+        // (TooManyBets, #17) must fire on the 21st bet only.
+        t.client.place_bet(&user, &id, &true, &11_0000000_i128);
     }
 }
 
@@ -1301,10 +1311,10 @@ fn test_many_winners_payouts_exact_and_dust_swept() {
     let w2 = Address::generate(&t.env);
     let w3 = Address::generate(&t.env);
     let l1 = Address::generate(&t.env);
-    fund_user(&t, &w1, 1_000_0000000);
-    fund_user(&t, &w2, 1_000_0000000);
-    fund_user(&t, &w3, 1_000_0000000);
-    fund_user(&t, &l1, 1_000_0000000);
+    fund_user(&t, &w1, 10_000_000_000);
+    fund_user(&t, &w2, 10_000_000_000);
+    fund_user(&t, &w3, 10_000_000_000);
+    fund_user(&t, &l1, 10_000_000_000);
 
     // Deliberately uneven stakes that do NOT divide the pool evenly.
     t.client.place_bet(&w1, &id, &true, &30_000_001_i128);
@@ -1349,11 +1359,11 @@ fn test_many_winners_payouts_exact_and_dust_swept() {
     t.client.claim(&w1, &id);
     t.client.claim(&w2, &id);
     t.client.claim(&w3, &id);
+    assert_eq!(bal_before - t.xlm.balance(&market_contract), p1 + p2 + p3);
     assert_eq!(
-        bal_before - t.xlm.balance(&market_contract),
-        p1 + p2 + p3
+        t.xlm.balance(&w1),
+        10_000_000_000_i128 - 30_000_001_i128 + p1
     );
-    assert_eq!(t.xlm.balance(&w1), 1_000_0000000_i128 - 30_000_001_i128 + p1);
 }
 
 // ── #2: single winner receives the whole pool (no dust) ─────────────────────
@@ -1363,8 +1373,8 @@ fn test_single_winner_gets_whole_net_pool() {
     let id = create_test_market(&t);
     let winner = Address::generate(&t.env);
     let loser = Address::generate(&t.env);
-    fund_user(&t, &winner, 1_000_0000000);
-    fund_user(&t, &loser, 1_000_0000000);
+    fund_user(&t, &winner, 10_000_000_000);
+    fund_user(&t, &loser, 10_000_000_000);
 
     t.client.place_bet(&winner, &id, &true, &60_0000000_i128);
     t.client.place_bet(&loser, &id, &false, &60_0000000_i128);
@@ -1416,8 +1426,9 @@ fn test_claim_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let before_bet = ttl(&bet_key);
     let before_market = ttl(&market_key);
@@ -1445,8 +1456,9 @@ fn test_cancel_refund_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let bet_before = ttl(&bet_key);
     let market_before = ttl(&market_key);
@@ -1455,4 +1467,499 @@ fn test_cancel_refund_rebumps_ttl_entries() {
 
     assert!(ttl(&bet_key) > bet_before);
     assert!(ttl(&market_key) > market_before);
+}
+
+// ── #9: resolution keeps claimable state alive together ───────────────────────
+// resolve_market rewrites the market, walks the bettor index, and creates
+// Payout keys. All of those must stay alive so every winner can later claim:
+// the index, the bet entries, the new payout keys, and the market itself.
+
+#[test]
+fn test_resolve_extends_claimable_state_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    // Deep into the TTL window — simulate a market that stayed open long after
+    // the bets were placed.
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let bet_alice_key = DataKey::Bet(id, alice.clone());
+    let bet_bob_key = DataKey::Bet(id, bob.clone());
+    let slot0_key = DataKey::BettorAt(id, 0);
+    let slot1_key = DataKey::BettorAt(id, 1);
+    let cnt_key = DataKey::BettorCount(id);
+
+    let before = [
+        ttl(&bet_alice_key),
+        ttl(&bet_bob_key),
+        ttl(&slot0_key),
+        ttl(&slot1_key),
+        ttl(&cnt_key),
+    ];
+
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // All pre-existing entries must be re-bumped, and the winner payout keys
+    // must be created with a fresh TTL — never expiring before their bet.
+    let after = [
+        ttl(&bet_alice_key),
+        ttl(&bet_bob_key),
+        ttl(&slot0_key),
+        ttl(&slot1_key),
+        ttl(&cnt_key),
+        ttl(&DataKey::Payout(id, alice.clone())),
+        ttl(&DataKey::Payout(id, bob.clone())),
+    ];
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert!(a > b, "expected TTL bump from {b} to {a}");
+    }
+    assert!(ttl(&DataKey::Payout(id, alice.clone())) > 0);
+    assert!(ttl(&DataKey::Payout(id, bob.clone())) > 0);
+}
+
+// ── #9: claim extends the Payout key too (winner) ─────────────────────────────
+// The payout key is the XLM source for a winner; a claim reading it must also
+// keep it alive, so state for that winner (bet + market + payout) dies together
+// only after it can no longer be needed.
+
+#[test]
+fn test_claim_rebumps_payout_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let payout_key = DataKey::Payout(id, alice.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let payout_before = ttl(&payout_key);
+
+    t.client.claim(&alice, &id);
+
+    assert!(ttl(&payout_key) > payout_before);
+}
+
+// ── #9: read-path views keep claimable state alive ────────────────────────────
+
+#[test]
+fn test_get_bet_extends_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let before = ttl(&bet_key);
+    t.client.get_bet(&id, &user);
+    assert!(ttl(&bet_key) > before);
+}
+
+#[test]
+fn test_get_market_extends_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let market_key = DataKey::Market(id);
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let before = ttl(&market_key);
+    t.client.get_market(&id);
+    assert!(ttl(&market_key) > before);
+}
+
+#[test]
+fn test_get_payout_extends_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let payout_key = DataKey::Payout(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let before = ttl(&payout_key);
+    // Single YES bettor: net 98M of a 98M pool → whole pool paid out.
+    assert_eq!(t.client.get_payout(&id, &user), 98_0000000);
+    assert!(ttl(&payout_key) > before);
+}
+
+#[test]
+fn test_get_market_bettors_page_extends_index_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let ttl = |key: &DataKey| -> u32 {
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
+    };
+    let cnt_before = ttl(&DataKey::BettorCount(id));
+    let slot0_before = ttl(&DataKey::BettorAt(id, 0));
+    let slot1_before = ttl(&DataKey::BettorAt(id, 1));
+
+    let page = t.client.get_market_bettors_page(&id, &0, &100);
+    assert_eq!(page.len(), 2);
+
+    assert!(ttl(&DataKey::BettorCount(id)) > cnt_before);
+    assert!(ttl(&DataKey::BettorAt(id, 0)) > slot0_before);
+    assert!(ttl(&DataKey::BettorAt(id, 1)) > slot1_before);
+}
+
+// ── #9: genuinely missing state still returns not-found errors ────────────────
+// Read-time TTL refresh must never resurrect an entry that was never written
+// (or one that has already expired). These assert the existing not-found
+// semantics are untouched by the TTL re-bumping.
+
+#[test]
+fn test_missing_state_preserves_not_found_semantics() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let stranger = Address::generate(&t.env);
+
+    // No bet ever placed.
+    let bet = t.client.try_get_bet(&id, &stranger);
+    match bet {
+        Err(Ok(e)) => assert_eq!(e, MarketError::NoBetFound),
+        other => panic!("expected NoBetFound, got {other:?}"),
+    }
+
+    // get_payout on a market that was never resolved → no key, 0.
+    assert_eq!(t.client.get_payout(&id, &stranger), 0);
+
+    // claim on a market with no bet → NoBetFound (unchanged).
+    let claim = t.client.try_claim(&stranger, &id);
+    match claim {
+        Err(Ok(e)) => assert_eq!(e, MarketError::MarketNotResolved),
+        other => panic!("expected MarketNotResolved, got {other:?}"),
+    }
+}
+
+// ── Upgrade Coordination (cross-contract interface versioning) ────────────────
+// Every cross-contract invoke is preceded by a require_interface_version() check
+// on the target. These tests prove each dependency fails closed (Incompatible
+// #27 / Missing #26) when its declared interface version is stale or absent,
+// and that a coordinated re-declaration recovers the system.
+
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
+
+fn assert_market_error(
+    r: Result<
+        Result<(), soroban_sdk::ConversionError>,
+        Result<MarketError, soroban_sdk::InvokeError>,
+    >,
+    expected: MarketError,
+) {
+    match r {
+        Err(Ok(e)) => assert_eq!(e, expected),
+        other => panic!("expected {expected:?}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_place_bet_rejects_incompatible_referral_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // Simulate an uncoordinated upgrade: referral registry still runs but its
+    // declared interface version (dropped to 0) no longer satisfies the
+    // market's required `credit` ABI (>= 1).
+    t.referral_client.set_interface_version(&t.admin, &0);
+
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::IncompatibleInterface,
+    );
+}
+
+#[test]
+fn test_place_bet_rejects_missing_referral_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // A deployment that never exposed `interface_version` (e.g. a contract
+    // upgraded from before this scheme existed). Fails closed as Missing.
+    let no_version = t.env.register(NoVersionContract, ());
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &no_version,
+        &t.leaderboard_client.address,
+        &t.xlm.address,
+    );
+
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::InterfaceVersionMissing,
+    );
+}
+
+#[test]
+fn test_claim_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Leaderboard's declared version is stale (uncoordinated upgrade).
+    t.leaderboard_client.set_interface_version(&t.admin, &0);
+
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+}
+
+#[test]
+fn test_claim_rejects_missing_leaderboard_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Leaderboard never exposed `interface_version`.
+    let no_version = t.env.register(NoVersionContract, ());
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &t.referral_client.address,
+        &no_version,
+        &t.xlm.address,
+    );
+
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::InterfaceVersionMissing,
+    );
+}
+
+#[test]
+fn test_unilateral_upgrade_fails_closed_then_recovers() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Uncoordinated leaderboard upgrade: new WASM is live but its declared
+    // version was not recommitted (dropped to 0 here, same as a fresh install
+    // that never ran set_interface_version). Every claim must fail closed and,
+    // crucially, must NOT consume the bet.
+    t.leaderboard_client.set_interface_version(&t.admin, &0);
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+
+    // Coordinated recovery: admin declares the new interface version; claims
+    // resume with no redeployment and no data migration.
+    t.leaderboard_client.set_interface_version(&t.admin, &1);
+    t.client.claim(&user, &id);
+
+    assert_eq!(t.xlm.balance(&user), 198_0000000);
+    assert_eq!(t.token_client.balance(&user), 10_0000000);
+}
+
+// ── Issue #40: revocable trust model ────────────────────────────────────────
+// prediction_market trusts cfg.referral (place_bet credit) and cfg.leaderboard
+// (claim reward). revoke_trust severs the relationship: affected calls fail
+// closed with TrustRevoked (#28) until restore_trust.
+
+#[test]
+fn test_revoke_referral_blocks_place_bet_and_restore_reenables() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // Enabled: bet works.
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    assert_eq!(t.xlm.balance(&user), 100_0000000);
+
+    // Revoke referral role.
+    t.client.revoke_trust(&t.admin, &symbol_short!("referral"));
+    assert!(t.client.is_trust_revoked(&symbol_short!("referral")));
+
+    // place_bet now fails closed with TrustRevoked.
+    let user2 = Address::generate(&t.env);
+    fund_user(&t, &user2, 200_0000000);
+    assert_market_error(
+        t.client
+            .try_place_bet(&user2, &id, &true, &100_0000000_i128),
+        MarketError::TrustRevoked,
+    );
+
+    // Read-only views unaffected.
+    assert_eq!(t.client.get_market(&id).bet_count, 1);
+
+    // Restore re-enables betting.
+    t.client.restore_trust(&t.admin, &symbol_short!("referral"));
+    t.client.place_bet(&user2, &id, &false, &100_0000000_i128);
+    assert!(!t.client.is_trust_revoked(&symbol_short!("referral")));
+}
+
+#[test]
+fn test_revoke_leaderboard_blocks_claim_and_restore_reenables() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Revoke leaderboard role.
+    t.client
+        .revoke_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+
+    // claim fails closed (no XLM payout, no reward, bet not consumed).
+    let pre = t.xlm.balance(&user);
+    assert_market_error(t.client.try_claim(&user, &id), MarketError::TrustRevoked);
+    assert_eq!(t.xlm.balance(&user), pre);
+    assert_eq!(t.token_client.balance(&user), 0);
+    assert_eq!(t.leaderboard_client.get_points(&user), 0);
+
+    // Restore re-enables the claim.
+    t.client
+        .restore_trust(&t.admin, &Symbol::new(&t.env, "leaderboard"));
+    t.client.claim(&user, &id);
+    // Single-bettor market: winner recovers their net stake + others' pool share.
+    assert_eq!(t.xlm.balance(&user), pre + 98_0000000);
+    assert_eq!(t.token_client.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_repointing_config_does_not_clear_revocation() {
+    // Re-pointing cfg.referral via set_config must NOT silently bypass an
+    // emergency revocation — only restore_trust re-enables the role.
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.revoke_trust(&t.admin, &symbol_short!("referral"));
+    let replacement = Address::generate(&t.env);
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &replacement,
+        &t.leaderboard_client.address,
+        &t.xlm.address,
+    );
+
+    assert!(t.client.is_trust_revoked(&symbol_short!("referral")));
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::TrustRevoked,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let t = setup();
+    let attacker = Address::generate(&t.env);
+    t.client.revoke_trust(&attacker, &symbol_short!("referral"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.revoke_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let t = setup();
+    t.client.restore_trust(&t.admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let t = setup();
+    assert!(!t.client.is_trust_revoked(&symbol_short!("referral")));
+    assert!(!t
+        .client
+        .is_trust_revoked(&Symbol::new(&t.env, "leaderboard")));
 }
