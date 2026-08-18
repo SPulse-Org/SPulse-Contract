@@ -358,6 +358,7 @@ fn setup_with_token(
         &String::from_str(env, "PULSE"),
         &String::from_str(env, "PLSE"),
         &7u32,
+        &1_000_000_000_000_000_i128,
     );
     // The leaderboard mints internally, so it must be an authorized minter.
     tclient.set_minter(&client.address);
@@ -442,4 +443,49 @@ fn test_reward_bonus_rejects_incompatible_token_version() {
     client.reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
     assert_eq!(client.get_points(&user), 5);
     assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+// ── Supply cap: reward-triggered mints are bounded by the token cap ──────────
+// The cap lives in pulse_token::mint(), so BOTH leaderboard mint entry points
+// (reward / reward_bonus) are capped through the shared internal dispatch.
+
+#[test]
+fn test_reward_mint_subject_to_token_cap() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Tighten the cap so only the first reward mint fits.
+    tclient.set_max_supply(&admin, &10_0000000_i128);
+
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+    assert_eq!(tclient.total_supply(), 10_0000000);
+
+    // A second reward mint would exceed the cap → the whole reward fails and
+    // nothing more is minted.
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert!(r.is_err(), "over-cap reward must fail, got {r:?}");
+    assert_eq!(tclient.balance(&user), 10_0000000);
+    assert_eq!(tclient.total_supply(), 10_0000000);
+}
+
+#[test]
+fn test_reward_bonus_mint_subject_to_token_cap() {
+    let (env, client, admin, _market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Cap is under the welcome-bonus size (10 PULSE).
+    tclient.set_max_supply(&admin, &5_0000000_i128);
+
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert!(r.is_err(), "over-cap reward_bonus must fail, got {r:?}");
+    assert_eq!(tclient.balance(&user), 0);
+    assert_eq!(tclient.total_supply(), 0);
+    assert_eq!(client.get_points(&user), 0);
 }

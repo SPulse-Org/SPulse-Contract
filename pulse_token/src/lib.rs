@@ -22,6 +22,11 @@ pub enum TokenError {
     InsufficientBalance = 4,
     InvalidAmount = 5,
     NotAdmin = 6,
+    MaxSupplyExceeded = 7,
+    // An attempt to set the max supply below the current total supply.
+    CapBelowCurrentSupply = 8,
+    // An attempt to raise an already-declared max supply (one-way ratchet).
+    CapTooHigh = 9,
 }
 
 #[contracttype]
@@ -36,6 +41,8 @@ pub enum DataKey {
     Decimals,
     // ── Interface versioning (upgrade coordination) ───────────────────────
     InterfaceVersion, // u32 — current interface version of this contract
+    // ── Supply cap (monetary policy) ─────────────────────────────────────
+    MaxSupply, // i128 — hard ceiling on total_supply, enforced at mint time
 }
 
 #[contract]
@@ -49,9 +56,13 @@ impl PULSETokenContract {
         name: String,
         symbol: String,
         decimals: u32,
+        max_supply: i128,
     ) -> Result<(), TokenError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(TokenError::AlreadyInitialized);
+        }
+        if max_supply < 0 {
+            return Err(TokenError::InvalidAmount);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -59,6 +70,9 @@ impl PULSETokenContract {
         env.storage().instance().set(&DataKey::Symbol, &symbol);
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::TotalSupply, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxSupply, &max_supply);
         env.storage()
             .instance()
             .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
@@ -132,6 +146,66 @@ impl PULSETokenContract {
         Ok(())
     }
 
+    // ── Supply cap (monetary policy) ───────────────────────────────────────
+    // MAX_SUPPLY is a hard ceiling on total_supply, enforced inside mint().
+    // It is set once at deploy time (initialize) and can subsequently only be
+    // lowered by the admin (one-way ratchet) — it can never be raised, so an
+    // admin cannot mint their way past the declared monetary policy.
+
+    /// Read the current max supply ceiling.
+    ///
+    /// `0` means the contract has no declared cap (a legacy deployment that
+    /// was never migrated via `set_max_supply`). Minting fails closed in that
+    /// state with `MaxSupplyExceeded`.
+    pub fn max_supply(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxSupply)
+            .unwrap_or(0)
+    }
+
+    /// Lower the max supply ceiling. Admin only. One-way ratchet.
+    ///
+    /// The cap can never be raised once declared, and can never be set below
+    /// the current total_supply (that would invalidate already-minted tokens).
+    /// This is how a legacy deployment (max_supply == 0) declares a cap for
+    /// the first time without allowing it to be inflated afterwards.
+    pub fn set_max_supply(env: Env, admin: Address, new_cap: i128) -> Result<(), TokenError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TokenError::NotInitialized)?;
+        if admin != stored {
+            return Err(TokenError::NotAdmin);
+        }
+        admin.require_auth();
+        let current_supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        if new_cap < current_supply {
+            return Err(TokenError::CapBelowCurrentSupply);
+        }
+        let current_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxSupply)
+            .unwrap_or(0);
+        if current_cap != 0 && new_cap > current_cap {
+            return Err(TokenError::CapTooHigh);
+        }
+        env.storage().instance().set(&DataKey::MaxSupply, &new_cap);
+        Ok(())
+    }
+
+    /// Mint `amount` PULSE to `to`. Authorized minter only.
+    ///
+    /// The entire mint succeeds or fails atomically against MAX_SUPPLY: the
+    /// resulting supply is computed with checked arithmetic first and the
+    /// balance/total_supply are written only if the cap is not exceeded. A
+    /// failed mint never partially updates balances or supply.
     pub fn mint(env: Env, minter: Address, to: Address, amount: i128) -> Result<(), TokenError> {
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
@@ -145,18 +219,32 @@ impl PULSETokenContract {
         if !is_minter {
             return Err(TokenError::UnauthorizedMinter);
         }
-        let balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to), &(balance + amount));
         let supply: i128 = env
             .storage()
             .instance()
             .get(&DataKey::TotalSupply)
             .unwrap_or(0);
+        let cap: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxSupply)
+            .unwrap_or(0);
+        // checked_add wraps instead of panicking — treat overflow as a cap
+        // violation rather than letting arithmetic bypass the ceiling.
+        let new_supply: i128 = match supply.checked_add(amount) {
+            Some(v) => v,
+            None => return Err(TokenError::MaxSupplyExceeded),
+        };
+        if cap == 0 || new_supply > cap {
+            return Err(TokenError::MaxSupplyExceeded);
+        }
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to), &(balance + amount));
         env.storage()
             .instance()
-            .set(&DataKey::TotalSupply, &(supply + amount));
+            .set(&DataKey::TotalSupply, &new_supply);
         Ok(())
     }
 
