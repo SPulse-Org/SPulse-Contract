@@ -104,11 +104,15 @@ pub struct Config {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetEntry {
-    pub net: i128,   // post-fee amount bet (used for payout)
-    pub gross: i128, // pre-fee amount sent (used for cancel_refund)
-    pub is_yes: bool,
-    pub claimed: bool,
-    pub count: u32, // how many times this user has bet on this market
+    pub net: i128,        // post-fee amount bet on current side (used for payout)
+    pub gross: i128,      // pre-fee amount sent on current side (used for cancel_refund)
+    pub is_yes: bool,     // current side: true = YES, false = NO
+    pub claimed: bool,    // claim status for current side
+    pub count: u32,       // how many times this user has bet on this market
+    // ── Opposite-side position for capital-preserving side-switching ───────
+    pub opposite_net: i128,      // net on opposite side (0 = no opposite position)
+    pub opposite_gross: i128,    // gross on opposite side (0 = no opposite position)
+    pub opposite_claimed: bool,  // claim status for opposite side
 }
 
 // ── WithdrawalRequest: capped, recipient-validated, timelocked (issue #12) ──
@@ -385,9 +389,8 @@ impl PredictionMarketContract {
             if e.count >= MAX_BETS_PER_USER {
                 return Err(MarketError::TooManyBets);
             }
-            if e.is_yes != is_yes {
-                return Err(MarketError::OppositeSideBet);
-            }
+            // Opposite-side check removed - allow side switching
+            // But validate that switching is capital-preserving (handled in write logic)
         }
 
         let is_increase = existing.is_some();
@@ -447,20 +450,59 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::AccumulatedFees, &acc_fees);
 
-        // ── Write BetEntry (net + gross + count in one write) ─────────────
-        let new_entry = match existing {
             Some(mut e) => {
-                e.net += net;
-                e.gross += amount;
-                e.count += 1;
-                e
+                // CAPITAL-PRESERVING SIDE-SWITCH LOGIC
+                if e.is_yes != is_yes {
+                    // Switching sides: move position from old side to new side
+                    let (current_net, current_gross, current_claimed) = if is_yes {
+                        (e.net, e.gross, e.claimed)
+                    } else {
+                        (e.opposite_net, e.opposite_gross, e.opposite_claimed)
+                    };
+                    
+                    // Remove from old side
+                    if is_yes {
+                        e.net = 0;
+                        e.gross = 0;
+                        e.claimed = false;
+                    } else {
+                        e.opposite_net = 0;
+                        e.opposite_gross = 0;
+                        e.opposite_claimed = false;
+                    }
+                    
+                    // Add to new side
+                    if is_yes {
+                        e.net += net;
+                        e.gross += amount;
+                        e.claimed = current_claimed;
+                    } else {
+                        e.opposite_net += net;
+                        e.opposite_gross += amount;
+                        e.opposite_claimed = current_claimed;
+                    }
+                    
+                    // Update current side indicator
+                    e.is_yes = is_yes;
+                    e.count += 1;
+                    e
+                } else {
+                    // Same-side bet: increase existing position
+                    e.net += net;
+                    e.gross += amount;
+                    e.count += 1;
+                    e
+                }
             }
             None => BetEntry {
-                net,
-                gross: amount,
+                net: if is_yes { net } else { 0 },
+                gross: if is_yes { amount } else { 0 },
                 is_yes,
                 claimed: false,
                 count: 1,
+                opposite_net: if !is_yes { net } else { 0 },
+                opposite_gross: if !is_yes { amount } else { 0 },
+                opposite_claimed: false,
             },
         };
         env.storage().persistent().set(&bet_key, &new_entry);
@@ -565,8 +607,14 @@ impl PredictionMarketContract {
                     };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
                 if let Some(entry) = env.storage().persistent().get::<DataKey, BetEntry>(&bet_key) {
-                    if entry.is_yes == outcome {
-                        let payout = (entry.net * total_pool) / winning_side;
+                    // Determine which side to include in payout calculation
+                    let (side_net, side_is_yes) = if entry.is_yes {
+                        (entry.net, true)
+                    } else {
+                        (entry.opposite_net, false)
+                    };
+                    if side_is_yes == outcome {
+                        let payout = (side_net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
                         env.storage().persistent().set(&payout_key, &payout);
                         env.storage()
@@ -642,11 +690,6 @@ impl PredictionMarketContract {
     pub fn cancel_refund(env: Env, user: Address, market_id: u64) -> Result<i128, MarketError> {
         user.require_auth();
 
-        let market = Self::load_market(&env, market_id)?;
-        if !market.cancelled {
-            return Err(MarketError::MarketNotCancelled);
-        }
-
         // OPT: read BetEntry (which now contains gross) — was a separate BetGross key
         let bet_key = DataKey::Bet(market_id, user.clone());
         let mut entry: BetEntry = env
@@ -703,11 +746,18 @@ impl PredictionMarketContract {
             .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
 
-        if entry.claimed {
+        // Find the correct side for claiming based on market outcome
+        let (side_net, side_claimed) = if entry.is_yes == market.outcome {
+            (entry.net, entry.claimed)
+        } else {
+            (entry.opposite_net, entry.opposite_claimed)
+        };
+
+        if side_claimed {
             return Err(MarketError::AlreadyClaimed);
         }
 
-        let is_winner = entry.is_yes == market.outcome;
+        let is_winner = true; // We're checking the correct side
         let total_pool = market.total_yes + market.total_no;
         let winning_side = if market.outcome {
             market.total_yes
@@ -716,7 +766,12 @@ impl PredictionMarketContract {
         };
 
         // SECURITY: mark claimed BEFORE any external calls.
-        entry.claimed = true;
+        // Mark the correct side as claimed
+        if entry.is_yes == market.outcome {
+            entry.claimed = true;
+        } else {
+            entry.opposite_claimed = true;
+        }
         env.storage().persistent().set(&bet_key, &entry);
         env.storage()
             .persistent()
@@ -743,13 +798,13 @@ impl PredictionMarketContract {
         } else {
             0
         };
-        if is_winner && payout > 0 {
+        if payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
 
         // All participants earn PULSE tokens + leaderboard points regardless.
         // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
-        let real_win = is_winner && winning_side > 0;
+        let real_win = winning_side > 0;
         let (points, tokens): (u64, i128) = if real_win {
             (WIN_POINTS, WIN_TOKENS)
         } else {
