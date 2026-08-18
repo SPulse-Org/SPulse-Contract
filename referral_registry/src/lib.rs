@@ -8,6 +8,10 @@ use soroban_sdk::{
 const WELCOME_BONUS_POINTS: u64 = 5;
 const WELCOME_BONUS_TOKENS: i128 = 1_0000000;
 const REFERRAL_BET_POINTS: u64 = 3;
+const MAX_DISPLAY_NAME_LEN: u32 = 64;
+const MAX_REFERRAL_EARNINGS: i128 = 500_000_000_000; // 50,000 XLM in stroops
+const TTL_BUMP: u32 = 3_153_600;
+const TTL_HIGH: u32 = 6_307_200;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -20,7 +24,9 @@ pub enum ReferralError {
     SelfReferral = 5,
     NotAdmin = 6,
     ContractPaused = 7,
-    ReferrerNotRegistered = 7,
+    ReferrerNotRegistered = 8,
+    DisplayNameTooLong = 9,
+    ReferralEarningsCapReached = 10,
 }
 
 #[contracttype]
@@ -41,6 +47,7 @@ pub enum DataKey {
     // updated in place — kept as separate keys (not part of the registrant pack).
     ReferralCount(Address),
     ReferralEarnings(Address),
+    SurplusFees,
     TokenContract,
     LeaderboardContract,
     XlmSacContract,
@@ -144,6 +151,9 @@ impl ReferralRegistryContract {
     ) -> Result<(), ReferralError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+        if display_name.len() > MAX_DISPLAY_NAME_LEN {
+            return Err(ReferralError::DisplayNameTooLong);
+        }
         if Self::is_registered(env.clone(), user.clone()) {
             return Err(ReferralError::AlreadyRegistered);
         }
@@ -165,6 +175,9 @@ impl ReferralRegistryContract {
                 referrer: referrer.clone(),
             },
         );
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Profile(user), TTL_BUMP, TTL_HIGH);
         // The referrer's counter is a DIFFERENT user's entry — update in place.
         if let Some(ref ref_addr) = referrer {
             let count: u32 = env
@@ -175,6 +188,9 @@ impl ReferralRegistryContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::ReferralCount(ref_addr.clone()), &(count + 1));
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::ReferralCount(ref_addr), TTL_BUMP, TTL_HIGH);
         }
 
         let this = env.current_contract_address();
@@ -210,6 +226,17 @@ impl ReferralRegistryContract {
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
         match referrer {
             Some(ref_addr) => {
+                // Issue 77: check earnings cap before transferring
+                let earnings: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ReferralEarnings(ref_addr.clone()))
+                    .unwrap_or(0);
+                if earnings + referral_fee > MAX_REFERRAL_EARNINGS {
+                    // Cap reached — fall through to surplus accumulator
+                    Self::add_surplus(&env, referral_fee);
+                    return Ok(false);
+                }
                 let xlm_sac: Address = env
                     .storage()
                     .instance()
@@ -235,33 +262,147 @@ impl ReferralRegistryContract {
                         REFERRAL_BET_POINTS.into_val(&env),
                     ],
                 );
-                let earnings: i128 = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::ReferralEarnings(ref_addr.clone()))
-                    .unwrap_or(0);
                 env.storage().persistent().set(
-                    &DataKey::ReferralEarnings(ref_addr),
+                    &DataKey::ReferralEarnings(ref_addr.clone()),
                     &(earnings + referral_fee),
+                );
+                env.storage().persistent().extend_ttl(
+                    &DataKey::ReferralEarnings(ref_addr),
+                    TTL_BUMP,
+                    TTL_HIGH,
                 );
                 Ok(true)
             }
             None => {
+                // Issue 78: keep the fee locally instead of round-tripping to caller
                 if referral_fee > 0 {
-                    let xlm_sac: Address = env
-                        .storage()
-                        .instance()
-                        .get(&DataKey::XlmSacContract)
-                        .unwrap();
-                    token::Client::new(&env, &xlm_sac).transfer(
-                        &env.current_contract_address(),
-                        &caller,
-                        &referral_fee,
-                    );
+                    Self::add_surplus(&env, referral_fee);
                 }
                 Ok(false)
             }
         }
+    }
+
+    fn add_surplus(env: &Env, amount: i128) {
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SurplusFees)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SurplusFees, &(current + amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::SurplusFees, TTL_BUMP, TTL_HIGH);
+    }
+
+    pub fn withdraw_surplus_fees(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<i128, ReferralError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap();
+        if admin != stored_admin {
+            return Err(ReferralError::NotAdmin);
+        }
+        admin.require_auth();
+        let amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SurplusFees)
+            .unwrap_or(0);
+        if amount <= 0 {
+            return Ok(0);
+        }
+        let xlm_sac: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::XlmSacContract)
+            .unwrap();
+        token::Client::new(&env, &xlm_sac).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &amount,
+        );
+        env.storage().persistent().set(&DataKey::SurplusFees, &0);
+        Ok(amount)
+    }
+
+    pub fn get_surplus_fees(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SurplusFees)
+            .unwrap_or(0)
+    }
+
+    /// Issue 75: Admin-callable legacy migration. Reads old Registered/DisplayName/Referrer keys,
+    /// writes the packed Profile entry, and removes the legacy keys. Idempotent — no-op if
+    /// Profile already exists.
+    pub fn migrate_user(env: Env, admin: Address, user: Address) -> Result<(), ReferralError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap();
+        if admin != stored_admin {
+            return Err(ReferralError::NotAdmin);
+        }
+        admin.require_auth();
+        // Already migrated — Profile exists, nothing to do
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Profile(user.clone()))
+        {
+            return Ok(());
+        }
+        // No legacy keys — nothing to migrate
+        if !env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::Registered(user.clone()))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let display_name: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisplayName(user.clone()))
+            .unwrap_or_else(|| String::from_str(&env, "user"));
+        let referrer: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Referrer(user.clone()));
+        // Write the packed profile
+        env.storage().persistent().set(
+            &DataKey::Profile(user.clone()),
+            &UserProfile {
+                display_name,
+                referrer: referrer.clone(),
+            },
+        );
+        // If this user has a referrer, increment that referrer's count
+        if let Some(ref ref_addr) = referrer {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ReferralCount(ref_addr.clone()))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::ReferralCount(ref_addr.clone()), &(count + 1));
+        }
+        // Remove legacy keys
+        env.storage().persistent().remove(&DataKey::Registered(user.clone()));
+        env.storage().persistent().remove(&DataKey::DisplayName(user.clone()));
+        env.storage().persistent().remove(&DataKey::Referrer(user));
+        Ok(())
     }
 
     fn load_profile(env: &Env, user: &Address) -> Option<UserProfile> {

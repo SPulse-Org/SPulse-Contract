@@ -32,7 +32,7 @@ fn setup() -> (
 fn test_add_points_and_verify_balance() {
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
-    client.add_pts(&market, &user, &100_u64, &true);
+    client.reward(&market, &user, &100_u64, &0_i128, &true);
     assert_eq!(client.get_points(&user), 100);
 }
 
@@ -40,9 +40,9 @@ fn test_add_points_and_verify_balance() {
 fn test_accumulate_points() {
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
-    client.add_pts(&market, &user, &50_u64, &true);
-    client.add_pts(&market, &user, &30_u64, &false);
-    client.add_pts(&market, &user, &20_u64, &true);
+    client.reward(&market, &user, &50_u64, &0_i128, &true);
+    client.reward(&market, &user, &30_u64, &0_i128, &false);
+    client.reward(&market, &user, &20_u64, &0_i128, &true);
     assert_eq!(client.get_points(&user), 100);
 }
 
@@ -50,8 +50,8 @@ fn test_accumulate_points() {
 fn test_bonus_pts_no_won_lost() {
     let (env, client, _admin, market, referral) = setup();
     let user = Address::generate(&env);
-    client.add_pts(&market, &user, &10_u64, &true);
-    client.add_pts(&market, &user, &5_u64, &false);
+    client.reward(&market, &user, &10_u64, &0_i128, &true);
+    client.reward(&market, &user, &5_u64, &0_i128, &false);
 
     let before = client.get_stats(&user);
     assert_eq!(before.won_bets, 1);
@@ -74,9 +74,9 @@ fn test_top_players_sorted() {
     let bob = Address::generate(&env);
     let charlie = Address::generate(&env);
 
-    client.add_pts(&market, &alice, &50_u64, &true);
-    client.add_pts(&market, &bob, &100_u64, &true);
-    client.add_pts(&market, &charlie, &75_u64, &true);
+    client.reward(&market, &alice, &50_u64, &0_i128, &true);
+    client.reward(&market, &bob, &100_u64, &0_i128, &true);
+    client.reward(&market, &charlie, &75_u64, &0_i128, &true);
 
     let top = client.get_top_players(&0_u32, &20_u32);
     assert_eq!(top.len(), 3);
@@ -94,7 +94,7 @@ fn test_top_players_capped_at_50() {
 
     for i in 1u64..=55 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &i, &true);
+        client.reward(&market, &user, &i, &0_i128, &true);
     }
 
     let page1 = client.get_top_players(&0_u32, &20_u32);
@@ -115,7 +115,7 @@ fn test_top_players_capped_at_50() {
 fn test_pagination_offset_beyond_count() {
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
-    client.add_pts(&market, &user, &100_u64, &true);
+    client.reward(&market, &user, &100_u64, &0_i128, &true);
     let result = client.get_top_players(&10_u32, &20_u32);
     assert_eq!(result.len(), 0);
 }
@@ -139,9 +139,9 @@ fn test_get_stats_aggregate() {
     let user = Address::generate(&env);
 
     // 2 wins, 1 loss = 3 total settled bets
-    client.add_pts(&market, &user, &20_u64, &true);
-    client.add_pts(&market, &user, &30_u64, &true);
-    client.add_pts(&market, &user, &5_u64, &false);
+    client.reward(&market, &user, &20_u64, &0_i128, &true);
+    client.reward(&market, &user, &30_u64, &0_i128, &true);
+    client.reward(&market, &user, &5_u64, &0_i128, &false);
 
     // Bonus points don't affect won/lost counts, but do count toward total_bets
     client.add_bonus_pts(&referral, &user, &10_u64);
@@ -183,9 +183,9 @@ fn test_rank_calculation() {
     let charlie = Address::generate(&env);
     let dave = Address::generate(&env);
 
-    client.add_pts(&market, &alice, &50_u64, &true);
-    client.add_pts(&market, &bob, &100_u64, &true);
-    client.add_pts(&market, &charlie, &75_u64, &true);
+    client.reward(&market, &alice, &50_u64, &0_i128, &true);
+    client.reward(&market, &bob, &100_u64, &0_i128, &true);
+    client.reward(&market, &charlie, &75_u64, &0_i128, &true);
 
     assert_eq!(client.get_rank(&bob), 1);
     assert_eq!(client.get_rank(&charlie), 2);
@@ -199,7 +199,7 @@ fn test_unauthorized_caller_rejected() {
     let (env, client, _admin, _market, _referral) = setup();
     let rando = Address::generate(&env);
     let user = Address::generate(&env);
-    client.add_pts(&rando, &user, &10_u64, &true);
+    client.reward(&rando, &user, &10_u64, &0_i128, &true);
 }
 
 #[test]
@@ -216,11 +216,11 @@ fn test_player_count() {
 
     let u1 = Address::generate(&env);
     let u2 = Address::generate(&env);
-    client.add_pts(&market, &u1, &10_u64, &true);
+    client.reward(&market, &u1, &10_u64, &0_i128, &true);
     assert_eq!(client.get_player_count(), 1);
-    client.add_pts(&market, &u2, &20_u64, &true);
+    client.reward(&market, &u2, &20_u64, &0_i128, &true);
     assert_eq!(client.get_player_count(), 2);
-    client.add_pts(&market, &u1, &5_u64, &false);
+    client.reward(&market, &u1, &5_u64, &0_i128, &false);
     assert_eq!(client.get_player_count(), 2);
 }
 
@@ -233,12 +233,12 @@ fn test_eviction_replaces_lowest_when_full() {
     let (env, client, _admin, market, _referral) = setup();
     for i in 0u64..50 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     assert_eq!(client.get_player_count(), 50);
 
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &500_u64, &true);
+    client.reward(&market, &newcomer, &500_u64, &0_i128, &true);
 
     // Still capped at 50; newcomer is now #1; the old min (100) is gone.
     assert_eq!(client.get_player_count(), 50);
@@ -256,10 +256,10 @@ fn test_low_scorer_rejected_when_full() {
     let (env, client, _admin, market, _referral) = setup();
     for i in 0u64..50 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(1000 + i), &true);
+        client.reward(&market, &user, &(1000 + i), &0_i128, &true);
     }
     let weak = Address::generate(&env);
-    client.add_pts(&market, &weak, &5_u64, &false);
+    client.reward(&market, &weak, &5_u64, &0_i128, &false);
 
     // Weak user has stats/points recorded, but is NOT in the top list (rank 0).
     assert_eq!(client.get_points(&weak), 5);
@@ -274,22 +274,22 @@ fn test_bottom_player_rising_updates_min() {
     let (env, client, _admin, market, _referral) = setup();
     let weakest = Address::generate(&env);
     // First entry is the weakest at 100; the rest are 110, 120, … (all higher).
-    client.add_pts(&market, &weakest, &100_u64, &true);
+    client.reward(&market, &weakest, &100_u64, &0_i128, &true);
     for i in 1u64..50 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(100 + i * 10), &true);
+        client.reward(&market, &user, &(100 + i * 10), &0_i128, &true);
     }
     assert_eq!(client.get_player_count(), 50);
 
     // Boost the weakest (100 -> 1000) so it is no longer the min.
-    client.add_pts(&market, &weakest, &900_u64, &true);
+    client.reward(&market, &weakest, &900_u64, &0_i128, &true);
     assert_eq!(client.get_points(&weakest), 1000);
 
     // The true new minimum is now 110 (second-lowest original). A newcomer with
     // 105 should be REJECTED (105 <= 110), proving the min recomputed correctly
     // rather than staying stale at 100.
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &105_u64, &true);
+    client.reward(&market, &newcomer, &105_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&newcomer), 0);
     assert_eq!(client.get_player_count(), 50);
 }
@@ -353,7 +353,7 @@ fn test_stale_slot_self_heals_after_entry_expired() {
     // player without duplicating them.
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
-    client.add_pts(&market, &user, &100_u64, &true);
+    client.reward(&market, &user, &100_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&user), 1);
 
     // Expire only the forward entry — the reverse mapping stays behind.
@@ -363,7 +363,7 @@ fn test_stale_slot_self_heals_after_entry_expired() {
 
     // The next update must not panic and must not treat the stale lookup as
     // the player being in the list.
-    client.add_pts(&market, &user, &50_u64, &true);
+    client.reward(&market, &user, &50_u64, &0_i128, &true);
     assert_eq!(client.get_points(&user), 150);
     assert_eq!(client.get_rank(&user), 1); // re-entered the list
 
@@ -385,7 +385,7 @@ fn test_eviction_repairs_expired_min_entry() {
         if i == 0 {
             weakest = Some(user.clone()); // 100 pts — the weakest of the set
         }
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     assert_eq!(client.get_player_count(), 50);
     let weakest = weakest.unwrap();
@@ -396,7 +396,7 @@ fn test_eviction_repairs_expired_min_entry() {
     });
 
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &500_u64, &true);
+    client.reward(&market, &newcomer, &500_u64, &0_i128, &true);
 
     // The list was reconciled: newcomer entered as #1, board is full again.
     assert_eq!(client.get_player_count(), 50);
@@ -422,13 +422,13 @@ fn test_eviction_clears_reverse_mapping() {
         if i == 0 {
             weakest = Some(user.clone());
         }
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     let weakest = weakest.unwrap();
     assert_eq!(client.get_rank(&weakest), 50);
 
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &1000_u64, &true);
+    client.reward(&market, &newcomer, &1000_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&newcomer), 1);
 
     // Displaced player: rank 0 and no lingering reverse mapping.
@@ -447,7 +447,7 @@ fn test_stale_min_rejected_before_eviction() {
     let (env, client, _admin, market, _referral) = setup();
     for i in 0u64..50 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     // Expire the minimum (100 pts) and leave the MinPoints cache stale at 100.
     env.as_contract(&client.address, || {
@@ -457,9 +457,20 @@ fn test_stale_min_rejected_before_eviction() {
     // 50 < stale min (100): a naive cache check would wrongly reject this
     // newcomer — the repaired list has room, so they must enter.
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &50_u64, &true);
+    client.reward(&market, &newcomer, &50_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&newcomer), 50);
     assert_eq!(client.get_player_count(), 50);
     let last = client.get_top_players(&40_u32, &20_u32);
     assert_eq!(last.get(9).unwrap().points, 50);
+}
+
+// ── Issue #63: add_pts is deprecated — returns UnauthorizedCaller ──────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_add_pts_always_rejected() {
+    let (env, client, _admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    // add_pts is deprecated and always returns UnauthorizedCaller
+    client.add_pts(&market, &user, &100_u64, &true);
 }

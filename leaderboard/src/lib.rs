@@ -143,6 +143,8 @@ impl LeaderboardContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
     /// Original ABI name — kept for callers that deploy against the pre-#23
     /// interface (prediction_market and referral_registry tests use it).
     pub fn set_token(
@@ -153,52 +155,18 @@ impl LeaderboardContract {
         Self::set_token_contract(env, admin, token)
     }
 
+    /// **Deprecated** — kept only for ABI backwards compatibility.
+    /// Use `reward()` instead. Always returns `UnauthorizedCaller`.
+    #[allow(deprecated)]
     pub fn add_pts(
         env: Env,
-        caller: Address,
-        user: Address,
-        pts: u64,
-        is_won: bool,
+        _caller: Address,
+        _user: Address,
+        _pts: u64,
+        _is_won: bool,
     ) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
-        let market: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::MarketContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != market {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
-        caller.require_auth();
-
-        let mut stats: PlayerStats = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stats(user.clone()))
-            .unwrap_or(PlayerStats {
-                points: 0,
-                total_bets: 0,
-                won_bets: 0,
-                lost_bets: 0,
-            });
-
-        stats.points += pts;
-        stats.total_bets += 1;
-        if is_won {
-            stats.won_bets += 1;
-        } else {
-            stats.lost_bets += 1;
-        }
-
-        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
-        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
-
-        Self::update_top_players(&env, user, stats.points);
-        // Instance storage (TopPlayerCount, MinPoints, MinSlot, Admin, etc.)
-        // has its own TTL that is never bumped by persistent-key writes above —
-        // refresh it on every write so the leaderboard's cached min survives.
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
-        Ok(())
+        Err(LeaderboardError::UnauthorizedCaller)
     }
 
     // ── reward() / reward_bonus() ──────────────────────────────────────────
@@ -717,6 +685,8 @@ impl LeaderboardContract {
             return Err(LeaderboardError::ContractPaused);
         }
         Ok(())
+    }
+
     fn mint_pulse(env: &Env, user: Address, amount: i128) {
         let token: Address = env
             .storage()

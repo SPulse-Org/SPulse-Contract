@@ -517,3 +517,72 @@ fn test_view_functions_work_while_paused() {
     assert_eq!(client.balance(&user), 50_0000000_i128);
     assert_eq!(client.total_supply(), 50_0000000_i128);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Issue #80: Idempotency — set_minter returns AlreadyMinter
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_set_minter_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter = Address::generate(&env);
+    client.set_minter(&minter);
+    // Second call with same address must fail with AlreadyMinter (#10)
+    client.set_minter(&minter);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Issue #80: remove_minter returns NotMinter when not authorized
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_remove_minter_not_minter() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let not_minter = Address::generate(&env);
+    // Must fail with NotMinter (#11)
+    client.remove_minter(&not_minter);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Issue #80: get_authorized_minters audit list
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_get_authorized_minters() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let minter1 = Address::generate(&env);
+    let minter2 = Address::generate(&env);
+    let minter3 = Address::generate(&env);
+
+    client.set_minter(&minter1);
+    client.set_minter(&minter2);
+    client.set_minter(&minter3);
+
+    let minters = client.get_authorized_minters();
+    assert_eq!(minters.len(), 3);
+    assert!(minters.contains(&minter1));
+    assert!(minters.contains(&minter2));
+    assert!(minters.contains(&minter3));
+
+    // Remove one and verify the list shrinks
+    client.remove_minter(&minter2);
+    let minters = client.get_authorized_minters();
+    assert_eq!(minters.len(), 2);
+    assert!(minters.contains(&minter1));
+    assert!(!minters.contains(&minter2));
+    assert!(minters.contains(&minter3));
+}

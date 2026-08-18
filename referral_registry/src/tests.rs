@@ -255,13 +255,14 @@ fn test_credit_no_referrer() {
     sac_admin.mint(&t.referral_id, &10_0000000_i128);
 
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
-    let market_bal_before = xlm_client.balance(&t.market);
+    let referral_bal_before = xlm_client.balance(&t.referral_id);
 
     let result = t.client.credit(&t.market, &user, &5_000_000);
     assert!(!result);
 
-    // Fee returned to caller (market contract)
-    assert_eq!(xlm_client.balance(&t.market), market_bal_before + 5_000_000);
+    // Issue #78: fee stays with referral contract as surplus (no round-trip)
+    assert_eq!(xlm_client.balance(&t.referral_id), referral_bal_before);
+    assert_eq!(t.client.get_surplus_fees(), 5_000_000);
 }
 
 // ── 8b. Credit returns false for completely unregistered user ─────────────────
@@ -276,13 +277,14 @@ fn test_credit_unregistered_user() {
     sac_admin.mint(&t.referral_id, &10_0000000_i128);
 
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
-    let market_bal_before = xlm_client.balance(&t.market);
+    let referral_bal_before = xlm_client.balance(&t.referral_id);
 
     let result = t.client.credit(&t.market, &user, &5_000_000);
     assert!(!result);
 
-    // Fee returned to caller (market contract)
-    assert_eq!(xlm_client.balance(&t.market), market_bal_before + 5_000_000);
+    // Issue #78: fee stays with referral contract as surplus (no round-trip)
+    assert_eq!(xlm_client.balance(&t.referral_id), referral_bal_before);
+    assert_eq!(t.client.get_surplus_fees(), 5_000_000);
 }
 
 // ── 9. Earnings accumulation across multiple credits ─────────────────────────
@@ -372,7 +374,7 @@ fn test_referral_count_tracking() {
 // ── 12. Unregistered referrers are rejected ─────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_reject_unregistered_referrer() {
     let t = setup();
     let user = Address::generate(&t.env);
@@ -535,4 +537,207 @@ fn test_view_functions_work_while_paused() {
 
     t.client.pause(&t.admin);
     assert!(t.client.is_registered(&user));
+}
+
+// ── Issue #76: display_name length limit ──────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_register_display_name_too_long() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    // 65 chars > MAX_DISPLAY_NAME_LEN (64)
+    let long_name = "A".repeat(65);
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &long_name), &no_ref);
+}
+
+#[test]
+fn test_register_display_name_at_limit() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    // Exactly 64 chars should succeed
+    let exact_name = "B".repeat(64);
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &exact_name), &no_ref);
+    assert!(t.client.is_registered(&user));
+}
+
+// ── Issue #75: legacy key migration ──────────────────────────────────────────
+
+#[test]
+fn test_migrate_user_writes_profile_removes_legacy() {
+    let t = setup();
+    let legacy_user = Address::generate(&t.env);
+    let legacy_ref = Address::generate(&t.env);
+
+    // Simulate a pre-upgrade registration by writing OLD keys directly
+    t.env.as_contract(&t.referral_id, || {
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Registered(legacy_user.clone()), &true);
+        t.env.storage().persistent().set(
+            &DataKey::DisplayName(legacy_user.clone()),
+            &String::from_str(&t.env, "OldTimer"),
+        );
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Referrer(legacy_user.clone()), &legacy_ref);
+    });
+
+    // Migrate
+    t.client.migrate_user(&t.admin, &legacy_user);
+
+    // Profile now exists
+    assert!(t.client.is_registered(&legacy_user));
+    assert_eq!(
+        t.client.get_display_name(&legacy_user),
+        String::from_str(&t.env, "OldTimer")
+    );
+    assert_eq!(t.client.get_referrer(&legacy_user), Some(legacy_ref.clone()));
+
+    // Legacy keys removed
+    let legacy_removed = t.env.as_contract(&t.referral_id, || {
+        !t.env
+            .storage()
+            .persistent()
+            .has(&DataKey::Registered(legacy_user.clone()))
+            && !t.env
+                .storage()
+                .persistent()
+                .has(&DataKey::DisplayName(legacy_user.clone()))
+                && !t.env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::Referrer(legacy_user))
+    });
+    assert!(legacy_removed);
+}
+
+#[test]
+fn test_migrate_user_noop_if_already_migrated() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    // Already has a Profile key — migration should be a no-op
+    t.env.as_contract(&t.referral_id, || {
+        t.env.storage().persistent().set(
+            &DataKey::Profile(user.clone()),
+            &UserProfile {
+                display_name: String::from_str(&t.env, "NewUser"),
+                referrer: None,
+            },
+        );
+    });
+
+    // Should succeed silently (no-op)
+    t.client.migrate_user(&t.admin, &user);
+    assert_eq!(
+        t.client.get_display_name(&user),
+        String::from_str(&t.env, "NewUser")
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_migrate_user_rejects_non_admin() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let not_admin = Address::generate(&t.env);
+    t.client.migrate_user(&not_admin, &user);
+}
+
+// ── Issue #77: referral earnings cap ──────────────────────────────────────────
+
+#[test]
+fn test_earnings_cap_rejects_excess() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&referrer, &String::from_str(&t.env, "BigRef"), &no_ref);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "Bettor"),
+        &Some(referrer.clone()),
+    );
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &1_000_000_000_000_i128); // 100,000 XLM
+
+    // Credit up to just under the cap
+    let under_cap = 499_000_000_000_i128;
+    t.client.credit(&t.market, &user, &under_cap);
+    assert_eq!(t.client.get_earnings(&referrer), under_cap);
+
+    // One more credit that would exceed the cap
+    let would_overflow = 2_000_000_000_i128;
+    let result = t.client.credit(&t.market, &user, &would_overflow);
+
+    // Earnings should be capped — credit returns false, fee goes to surplus
+    assert!(!result);
+    assert_eq!(t.client.get_earnings(&referrer), under_cap); // unchanged
+    assert_eq!(t.client.get_surplus_fees(), would_overflow);
+}
+
+// ── Issue #78: surplus fees accumulation + withdrawal ─────────────────────────
+
+#[test]
+fn test_surplus_fees_accumulate() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, "Solo"), &no_ref);
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    t.client.credit(&t.market, &user, &5_000_000);
+    assert_eq!(t.client.get_surplus_fees(), 5_000_000);
+
+    t.client.credit(&t.market, &user, &3_000_000);
+    assert_eq!(t.client.get_surplus_fees(), 8_000_000);
+}
+
+#[test]
+fn test_withdraw_surplus_fees() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, "Solo"), &no_ref);
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    t.client.credit(&t.market, &user, &5_000_000);
+
+    let recipient = Address::generate(&t.env);
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    let recipient_before = xlm_client.balance(&recipient);
+
+    let withdrawn = t.client.withdraw_surplus_fees(&t.admin, &recipient);
+    assert_eq!(withdrawn, 5_000_000);
+    assert_eq!(xlm_client.balance(&recipient), recipient_before + 5_000_000);
+    assert_eq!(t.client.get_surplus_fees(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_withdraw_surplus_fees_rejects_non_admin() {
+    let t = setup();
+    let not_admin = Address::generate(&t.env);
+    let recipient = Address::generate(&t.env);
+    t.client.withdraw_surplus_fees(&not_admin, &recipient);
 }
