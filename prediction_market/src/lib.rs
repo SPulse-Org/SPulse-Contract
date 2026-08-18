@@ -625,10 +625,27 @@ impl PredictionMarketContract {
                 .persistent()
                 .get(&DataKey::BettorCount(market_id))
                 .unwrap_or(0);
+            // Read-time TTL refresh (issue #9): the bettor index, the bet
+            // entries, and the payouts derived from them must all stay alive
+            // together. A long-lived market could otherwise see its index
+            // expire before resolution, silently dropping bettors from the
+            // enumeration and locking their stake in the pool. BettorCount is
+            // lazily written on the first bet, so only bump it when present.
+            if bettors > 0 {
+                env.storage().persistent().extend_ttl(
+                    &DataKey::BettorCount(market_id),
+                    TTL_BUMP,
+                    TTL_HIGH,
+                );
+            }
 
             for i in 0..bettors {
                 let slot_key = DataKey::BettorAt(market_id, i);
                 let bettor: Address = if let Some(a) = env.storage().persistent().get(&slot_key) {
+                    // Keep the index slot alive while we walk it.
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&slot_key, TTL_BUMP, TTL_HIGH);
                     a
                 } else {
                     continue;
@@ -639,6 +656,11 @@ impl PredictionMarketContract {
                     .persistent()
                     .get::<DataKey, BetEntry>(&bet_key)
                 {
+                    // Keep the bet alive so the winner can later claim against
+                    // it (claim reads the same Bet + Payout pair).
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
                     if entry.is_yes == outcome {
                         let payout = (entry.net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
@@ -808,10 +830,20 @@ impl PredictionMarketContract {
             .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
         // Read-time TTL refresh (issue #9): a claim must not be able to observe
         // an expired market/bet record — keep the market entry alive here too
-        // so late claims on a long-lived market keep working.
+        // so late claims on a long-lived market keep working. The Payout key
+        // is the XLM source for a winner, so it must stay alive as long as the
+        // bet that pays against it: bump all three together. Losers have no
+        // Payout key (the host errors on extending a non-existent key), so
+        // guard the payout bump with has().
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        if env.storage().persistent().has(&payout_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&payout_key, TTL_BUMP, TTL_HIGH);
+        }
 
         // XLM payout straight from the settlement-time payout ledger.
         // Winners are exactly the bettors who own a Payout entry; everyone
@@ -819,7 +851,7 @@ impl PredictionMarketContract {
         let payout: i128 = env
             .storage()
             .persistent()
-            .get::<DataKey, i128>(&DataKey::Payout(market_id, user.clone()))
+            .get::<DataKey, i128>(&payout_key)
             .unwrap_or_default();
         if is_winner && payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
@@ -1003,16 +1035,26 @@ impl PredictionMarketContract {
     // ── View Functions ────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, MarketError> {
-        Self::load_market(&env, market_id)
+        let market = Self::load_market(&env, market_id)?;
+        // Read-time TTL refresh (issue #9): viewing a market is a user
+        // interaction that keeps the market entry claimable — as long as
+        // anyone is still interacting with the market, late claims/refunds
+        // against it remain possible.
+        Self::bump_ttl(&env, &DataKey::Market(market_id));
+        Ok(market)
     }
 
     // OPT: returns Bet (ABI-compatible) derived from BetEntry
     pub fn get_bet(env: Env, market_id: u64, user: Address) -> Result<Bet, MarketError> {
+        let bet_key = DataKey::Bet(market_id, user.clone());
         let e: BetEntry = env
             .storage()
             .persistent()
-            .get(&DataKey::Bet(market_id, user))
+            .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
+        // Read-time TTL refresh (issue #9): a user checking their bet is the
+        // key interaction that keeps their claimable entry alive.
+        Self::bump_ttl(&env, &bet_key);
         Ok(Bet {
             amount: e.net,
             is_yes: e.is_yes,
@@ -1050,15 +1092,23 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::BettorCount(market_id))
             .unwrap_or(0);
+        // Read-time TTL refresh (issue #9): enumerating the bettor index is the
+        // interaction that keeps the index alive for later resolution — keep
+        // the entries claimable for as long as anyone is still querying them.
+        if count > 0 {
+            Self::bump_ttl(&env, &DataKey::BettorCount(market_id));
+        }
         let page_limit = limit.min(MAX_BETTORS_PER_PAGE);
         let end = start.saturating_add(page_limit).min(count);
         let mut result: Vec<Address> = Vec::new(&env);
         for i in start..end {
+            let slot_key = DataKey::BettorAt(market_id, i);
             if let Some(addr) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Address>(&DataKey::BettorAt(market_id, i))
+                .get::<DataKey, Address>(&slot_key)
             {
+                Self::bump_ttl(&env, &slot_key);
                 result.push_back(addr);
             }
         }
@@ -1086,10 +1136,19 @@ impl PredictionMarketContract {
     }
 
     pub fn get_payout(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        let payout = env
+            .storage()
             .persistent()
-            .get(&DataKey::Payout(market_id, user))
-            .unwrap_or(0)
+            .get::<DataKey, i128>(&payout_key)
+            .unwrap_or(0);
+        // Read-time TTL refresh (issue #9): a winner checking their payout keeps
+        // the payout entry alive for a later claim. Only present for winners,
+        // so bump only when the key exists.
+        if env.storage().persistent().has(&payout_key) {
+            Self::bump_ttl(&env, &payout_key);
+        }
+        payout
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
@@ -1116,6 +1175,22 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::Market(market_id))
             .ok_or(MarketError::MarketNotFound)
+    }
+
+    /// Read-time TTL refresh for persistent entries that must stay alive while
+    /// they remain claimable (issue #9). Re-arms the key's expiry window so a
+    /// user who interacts before the current TTL lapses keeps their claimable
+    /// state (and any later claim/refund against it) recoverable.
+    ///
+    /// Callers MUST only invoke this on keys they have already confirmed to
+    /// exist: the host errors ("trying to extend invalid entry") when asked to
+    /// extend a deleted or never-written key, and an already-expired entry
+    /// cannot be resurrected by design (issue #9 documents this limitation).
+    #[inline]
+    fn bump_ttl(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_BUMP, TTL_HIGH);
     }
 
     // ── Interface versioning helpers (upgrade coordination) ──────────────
