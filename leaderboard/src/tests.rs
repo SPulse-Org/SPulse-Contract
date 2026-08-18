@@ -489,3 +489,157 @@ fn test_reward_bonus_mint_subject_to_token_cap() {
     assert_eq!(tclient.total_supply(), 0);
     assert_eq!(client.get_points(&user), 0);
 }
+
+// ── Issue #40: revocable trust model ─────────────────────────────────────────
+// Each trusted dependency (market / referral / token) is a revokeable role.
+// revoke_trust severs the relationship: the privileged path fails closed with
+// TrustRevoked (#8) until restore_trust. Re-pointing the address does NOT clear
+// a revocation — restoration is always an explicit admin act.
+
+#[test]
+fn test_revoke_market_blocks_add_pts_and_restore_reenables() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+
+    // Enabled: works.
+    client.add_pts(&market, &user, &10_u64, &true);
+    assert_eq!(client.get_points(&user), 10);
+
+    // Revoke the market role.
+    client.revoke_trust(&admin, &symbol_short!("market"));
+    assert!(client.is_trust_revoked(&symbol_short!("market")));
+
+    // add_pts / record_bet / reward (tokens=0) now fail closed with TrustRevoked.
+    let r = client.try_add_pts(&market, &user, &10_u64, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let r = client.try_record_bet(&market, &user);
+    assert!(r.is_err(), "record_bet must fail when market is revoked");
+    let r = client.try_reward(&market, &user, &30_u64, &0_i128, &true);
+    assert!(r.is_err(), "reward must fail when market is revoked");
+
+    // Unrelated read-only views keep working after revocation.
+    assert_eq!(client.get_points(&user), 10);
+    assert_eq!(client.get_top_player_count(), 1);
+
+    // Restore re-enables the role.
+    client.restore_trust(&admin, &symbol_short!("market"));
+    client.add_pts(&market, &user, &10_u64, &true);
+    assert_eq!(client.get_points(&user), 20);
+    assert!(!client.is_trust_revoked(&symbol_short!("market")));
+}
+
+#[test]
+fn test_revoke_referral_blocks_bonus_paths_and_restore_reenables() {
+    let (env, client, admin, _market, referral) = setup();
+    let user = Address::generate(&env);
+
+    // Revoke referral role.
+    client.revoke_trust(&admin, &symbol_short!("referral"));
+
+    // add_bonus_pts / reward_bonus (tokens=0) fail closed.
+    let r = client.try_add_bonus_pts(&referral, &user, &3_u64);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &0_i128);
+    assert!(
+        r.is_err(),
+        "reward_bonus must fail when referral is revoked"
+    );
+    assert_eq!(
+        client.get_points(&user),
+        0,
+        "no partial award on revoked referral"
+    );
+
+    client.restore_trust(&admin, &symbol_short!("referral"));
+    client.add_bonus_pts(&referral, &user, &3_u64);
+    assert_eq!(client.get_points(&user), 3);
+}
+
+#[test]
+fn test_revoke_token_blocks_reward_mint_without_partial_award() {
+    let (env, client, admin, market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+
+    // Revoke the token role.
+    client.revoke_trust(&admin, &symbol_short!("token"));
+
+    // reward with tokens > 0 must fail closed BEFORE awarding points or minting.
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+    assert_eq!(tclient.balance(&user), 0);
+
+    // reward_bonus with tokens > 0 is equally blocked.
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert!(r.is_err(), "reward_bonus must fail when token is revoked");
+    assert_eq!(tclient.balance(&user), 0);
+
+    // Restore re-enables minting.
+    client.restore_trust(&admin, &symbol_short!("token"));
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_repointing_token_does_not_clear_revocation() {
+    // A replacement address via set_token_contract must NOT silently bypass an
+    // emergency revocation — only restore_trust re-enables a revoked role.
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    client.revoke_trust(&admin, &symbol_short!("token"));
+    let replacement = Address::generate(&env);
+    client.set_token_contract(&admin, &replacement);
+
+    // Still revoked after re-pointing: reward must fail closed.
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::TrustRevoked),
+        other => panic!("expected TrustRevoked, got {other:?}"),
+    }
+    assert!(client.is_trust_revoked(&symbol_short!("token")));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_revoke_trust_rejects_non_admin() {
+    let (env, client, _admin, _market, _referral) = setup();
+    let attacker = Address::generate(&env);
+    client.revoke_trust(&attacker, &symbol_short!("market"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_revoke_trust_rejects_unknown_role() {
+    let (_env, client, admin, _market, _referral) = setup();
+    client.revoke_trust(&admin, &symbol_short!("bogus"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_restore_trust_rejects_unknown_role() {
+    let (_env, client, admin, _market, _referral) = setup();
+    client.restore_trust(&admin, &symbol_short!("bogus"));
+}
+
+#[test]
+fn test_trust_revoked_view_reports_default_false() {
+    let (_env, client, _admin, _market, _referral) = setup();
+    assert!(!client.is_trust_revoked(&symbol_short!("market")));
+    assert!(!client.is_trust_revoked(&symbol_short!("referral")));
+    assert!(!client.is_trust_revoked(&symbol_short!("token")));
+}

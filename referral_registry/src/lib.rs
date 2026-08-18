@@ -1,13 +1,17 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Error,
-    IntoVal, String, Symbol, Val,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Error, IntoVal, String, Symbol, Val,
 };
 
 const WELCOME_BONUS_POINTS: u64 = 5;
 const WELCOME_BONUS_TOKENS: i128 = 1_0000000;
 const REFERRAL_BET_POINTS: u64 = 3;
+
+// TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
+const TTL_BUMP: u32 = 3_153_600;
+const TTL_HIGH: u32 = 6_307_200;
 
 // ── Interface versioning (upgrade coordination) ──────────────────────────────
 // INTERFACE_VERSION identifies the ABI this contract exposes to its callers.
@@ -34,6 +38,12 @@ pub enum ReferralError {
     InterfaceVersionMissing = 7,
     // The target contract's interface version is below the required minimum.
     IncompatibleInterface = 8,
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // A trusted dependency (leaderboard / xlm_sac) was revoked by the admin;
+    // every operation that depends on that role fails closed until restore.
+    TrustRevoked = 9,
+    // revoke_trust/restore_trust was called with an unknown role symbol.
+    InvalidRole = 10,
 }
 
 #[contracttype]
@@ -59,6 +69,10 @@ pub enum DataKey {
     XlmSacContract,
     // ── Interface versioning (upgrade coordination) ───────────────────────
     InterfaceVersion, // u32 — current interface version of this contract
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Persistent flag (true) meaning the trusted contract for `role` is
+    // revoked. Absent key == trusted/enabled.
+    TrustRevoked(Symbol),
 }
 
 // Lever A: packed registrant profile — one storage slot instead of three.
@@ -129,6 +143,73 @@ impl ReferralRegistryContract {
         Ok(())
     }
 
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // The registry trusts the market (sole caller of credit), the leaderboard
+    // (reward_bonus / add_bonus_pts), and the XLM SAC (fee payouts). Each is a
+    // role the admin can revoke to sever the trust relationship immediately —
+    // every operation that depends on the role then fails closed with
+    // TrustRevoked. Restoration is an explicit, admin-only act.
+
+    /// Revoke trust in the contract bound to `role`. Admin only.
+    ///
+    /// Roles: "market", "leaderboard", "xlm_sac" (and "token", stored for the
+    /// legacy minter config — inert today because the leaderboard mints
+    /// internally, but tracked so the relationship stays auditable).
+    pub fn revoke_trust(env: Env, admin: Address, role: Symbol) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(ReferralError::InvalidRole);
+        }
+        let key = DataKey::TrustRevoked(role);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Restore trust in the contract bound to `role`. Admin only.
+    pub fn restore_trust(env: Env, admin: Address, role: Symbol) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(ReferralError::InvalidRole);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustRevoked(role));
+        Ok(())
+    }
+
+    /// Read-only trust status for `role` (true == revoked). Never panics,
+    /// never requires admin — usable by anyone to observe revocation state.
+    pub fn is_trust_revoked(env: Env, role: Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+    }
+
+    fn is_known_role(env: &Env, role: &Symbol) -> bool {
+        *role == Symbol::new(env, "market")
+            || *role == Symbol::new(env, "leaderboard")
+            || *role == Symbol::new(env, "token")
+            || *role == Symbol::new(env, "xlm_sac")
+    }
+
+    fn require_trust_not_revoked(env: &Env, role: Symbol) -> Result<(), ReferralError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+        {
+            return Err(ReferralError::TrustRevoked);
+        }
+        Ok(())
+    }
+
     // ── Interface Versioning (upgrade coordination) ──────────────────────
     // Every contract that participates in cross-contract calls exposes a
     // stable interface version. Callers read it and refuse to invoke a
@@ -192,6 +273,10 @@ impl ReferralRegistryContract {
             .instance()
             .get(&DataKey::LeaderboardContract)
             .unwrap();
+        // Issue #40: a revoked leaderboard dependency fails the whole
+        // registration — it must not register a user and silently skip the
+        // welcome bonus that the trust relationship is supposed to deliver.
+        Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
         Self::require_interface_version(&env, &leaderboard, LEADERBOARD_BONUS_INTERFACE_VERSION)?;
 
         // Lever A: write ONE packed Profile entry (display_name + referrer)
@@ -241,6 +326,9 @@ impl ReferralRegistryContract {
     ) -> Result<bool, ReferralError> {
         caller.require_auth();
         Self::require_market_contract(&env, &caller)?;
+        // Issue #40: verify the XLM SAC trust before any fee payout in either
+        // branch below, so a revoked SAC fails closed before funds move.
+        Self::require_trust_not_revoked(&env, symbol_short!("xlm_sac"))?;
         // Lever A: resolve referrer via packed Profile (new) or legacy key (old).
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
         match referrer {
@@ -250,6 +338,10 @@ impl ReferralRegistryContract {
                     .instance()
                     .get(&DataKey::LeaderboardContract)
                     .unwrap();
+                // Issue #40: a revoked leaderboard dependency fails the whole
+                // credit — no fee paid out to a referral economy whose bonus
+                // leg is severed.
+                Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
                 // Upgrade coordination: verify the leaderboard exposes a
                 // compatible `add_bonus_pts` interface BEFORE transferring the
                 // fee or writing any state, so a unilateral incompatible
@@ -382,6 +474,9 @@ impl ReferralRegistryContract {
         if *caller != market {
             return Err(ReferralError::UnauthorizedCaller);
         }
+        // Issue #40: even the on-record market cannot drive credit() once its
+        // trust role has been revoked by the admin — fails closed deterministically.
+        Self::require_trust_not_revoked(env, symbol_short!("market"))?;
         Ok(())
     }
 

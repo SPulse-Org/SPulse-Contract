@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Error,
-    IntoVal, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Error, IntoVal, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -84,6 +84,12 @@ pub enum MarketError {
     // The target contract's interface version is below the minimum this
     // contract requires for the function it is about to invoke.
     IncompatibleInterface = 27,
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // A trusted dependency (referral / leaderboard) was revoked by the admin;
+    // every operation that depends on that role fails closed until restore.
+    TrustRevoked = 28,
+    // revoke_trust/restore_trust was called with an unknown role symbol.
+    InvalidRole = 29,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -109,6 +115,10 @@ pub enum DataKey {
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
     // ── Interface versioning (upgrade coordination) ───────────────────────
     InterfaceVersion, // u32 — current interface version of this contract
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Persistent flag (true) meaning the trusted dependency for `role` is
+    // revoked. Absent key == trusted/enabled.
+    TrustRevoked(Symbol),
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -261,6 +271,76 @@ impl PredictionMarketContract {
     /// Read the current Config (for verification/admin tooling).
     pub fn get_config(env: Env) -> Config {
         env.storage().instance().get(&DataKey::Cfg).unwrap()
+    }
+
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // The market trusts two external dependencies: the referral registry
+    // (set at initialize "referral_contract") and the leaderboard (set at
+    // initialize "leaderboard_contract"). Each is tracked as a role the admin
+    // can revoke to sever the trust relationship immediately — every function
+    // that depends on the role then fails closed with TrustRevoked. A role is
+    // re-enabled ONLY by an explicit restore_trust call; re-pointing cfg via
+    // set_config does NOT clear a revocation, so a rushed re-config cannot
+    // silently bypass an emergency revocation.
+
+    /// Revoke trust in the dependency bound to `role`. Admin only.
+    ///
+    /// Roles: "referral", "leaderboard". After revocation, place_bet (referral)
+    /// and claim (leaderboard) fail closed with `TrustRevoked` until the admin
+    /// explicitly calls `restore_trust`.
+    pub fn revoke_trust(env: Env, admin: Address, role: Symbol) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(MarketError::InvalidRole);
+        }
+        let key = DataKey::TrustRevoked(role);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Restore trust in the dependency bound to `role`. Admin only.
+    ///
+    /// Clears a prior `revoke_trust`. This is the ONLY way to re-enable a
+    /// revoked role; set_config re-pointing does not remove the revocation.
+    pub fn restore_trust(env: Env, admin: Address, role: Symbol) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(MarketError::InvalidRole);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustRevoked(role));
+        Ok(())
+    }
+
+    /// Read-only trust status for `role` (true == revoked). Never panics,
+    /// never requires admin — usable by anyone to observe revocation state.
+    pub fn is_trust_revoked(env: Env, role: Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+    }
+
+    fn is_known_role(env: &Env, role: &Symbol) -> bool {
+        *role == Symbol::new(env, "referral") || *role == Symbol::new(env, "leaderboard")
+    }
+
+    fn require_trust_not_revoked(env: &Env, role: Symbol) -> Result<(), MarketError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+        {
+            return Err(MarketError::TrustRevoked);
+        }
+        Ok(())
     }
 
     // ── Interface Versioning (upgrade coordination) ──────────────────────
@@ -477,6 +557,12 @@ impl PredictionMarketContract {
         acc_fees += platform_fee;
 
         // ── Referral (skip if cached no-referrer) ─────────────────────────
+        // Issue #40: a revoked referral dependency fails the entire bet — we
+        // must not place a bet that silently skips the (revoked) referral fee
+        // routing the protocol depends on. Restore requires an explicit admin
+        // restore_trust call.
+        Self::require_trust_not_revoked(&env, symbol_short!("referral"))?;
+
         let hr_key = DataKey::HasReferrer(user.clone());
         let cached: Option<bool> = env.storage().persistent().get(&hr_key);
 
@@ -811,6 +897,10 @@ impl PredictionMarketContract {
         };
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        // Issue #40: a revoked leaderboard dependency fails the entire claim —
+        // the reward (points + PULSE mint) is part of what claim() must deliver,
+        // so we fail closed instead of paying out XLM with no reward.
+        Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
         // Upgrade coordination: verify the leaderboard exposes a compatible
         // `reward` interface BEFORE any local state changes or external calls,
         // so a unilateral incompatible upgrade fails the whole claim atomically
