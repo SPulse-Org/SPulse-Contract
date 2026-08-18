@@ -1,4 +1,4 @@
-﻿{
+{
   "generators": {
     "address": 7,
     "nonce": 0,
@@ -800,6 +800,18 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "Name"
                           }
                         ]
@@ -863,14 +875,6 @@
                 "map": [
                   {
                     "key": {
-                      "symbol": "bonus_bets"
-                    },
-                    "val": {
-                      "u32": 0
-                    }
-                  },
-                  {
-                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -883,6 +887,14 @@
                     },
                     "val": {
                       "u64": "30"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "total_bets"
+                    },
+                    "val": {
+                      "u32": 1
                     }
                   },
                   {
@@ -970,7 +982,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6307301
+        "live_until": 200
       },
       {
         "entry": {
@@ -1003,6 +1015,18 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "MarketContract"
                           }
                         ]
@@ -1020,7 +1044,7 @@
                         ]
                       },
                       "val": {
-                        "u64": "30"
+                        "u64": "0"
                       }
                     },
                     {
@@ -1078,7 +1102,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 199
+        "live_until": 6307300
       },
       {
         "entry": {
@@ -1105,6 +1129,18 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {
@@ -1454,6 +1490,36 @@
             "contract_data": {
               "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Payout"
+                  },
+                  {
+                    "u64": "1"
+                  },
+                  {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "i128": "980000000"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6307301
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
               "key": "ledger_key_contract_instance",
               "durability": "persistent",
               "val": {
@@ -1529,6 +1595,18 @@
                             }
                           }
                         ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {
@@ -1882,7 +1960,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 199
+        "live_until": 6307300
       }
     ]
   },

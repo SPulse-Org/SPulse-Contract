@@ -1,5 +1,6 @@
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::Address as _,
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -8,6 +9,16 @@ use soroban_sdk::{
 // Import sibling contracts for inter-contract testing
 use leaderboard::LeaderboardContract;
 use pulse_token::PULSETokenContract;
+
+// Dummy contract with no interface_version getter — simulates a contract
+// deployed before the versioning scheme existed.
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
 
 // ── Test Helpers ──────────────────────────────────────────────────────────────
 
@@ -430,4 +441,123 @@ fn test_legacy_user_without_referrer() {
     assert!(s.client.is_registered(&legacy_user));
     assert_eq!(s.client.get_referrer(&legacy_user), None);
     assert!(!s.client.has_referrer(&legacy_user));
+}
+
+// ── Upgrade Coordination: referral → leaderboard reward_bonus / add_bonus_pts ─
+
+fn leaderboard_client(t: &TestSetup) -> leaderboard::LeaderboardContractClient<'static> {
+    leaderboard::LeaderboardContractClient::new(&t.env, &t.leaderboard_id)
+}
+
+#[test]
+fn test_register_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let lb = leaderboard_client(&t);
+    lb.set_interface_version(&t.admin, &0); // uncoordinated downgrade
+
+    let user = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&user, &String::from_str(&t.env, "NewUser"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    // Fail closed: registration must NOT be recorded by the rejected call.
+    assert!(!t.client.is_registered(&user));
+
+    // Coordinated recovery: re-declare the version, registration proceeds.
+    lb.set_interface_version(&t.admin, &1);
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, "NewUser"), &None);
+    assert!(t.client.is_registered(&user));
+    assert_eq!(lb.get_points(&user), 5);
+}
+
+#[test]
+fn test_register_rejects_missing_leaderboard_version() {
+    let t = setup();
+    // Leaderboard never exposed interface_version (pre-this-scheme contract).
+    let no_version = t.env.register(NoVersionContract, ());
+    t.env.as_contract(&t.referral_id, || {
+        t.env
+            .storage()
+            .instance()
+            .set(&DataKey::LeaderboardContract, &no_version);
+    });
+
+    let user = Address::generate(&t.env);
+    let r = t
+        .client
+        .try_register_referral(&user, &String::from_str(&t.env, "Solo"), &None);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    assert!(!t.client.is_registered(&user));
+}
+
+#[test]
+fn test_credit_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    let lb = leaderboard_client(&t);
+    lb.set_interface_version(&t.admin, &0); // uncoordinated downgrade
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    // Fail closed BEFORE the fee transfer: the referrer must have been paid
+    // nothing on the rejected call.
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
+
+    // Coordinated recovery: credit proceeds and pays the referrer.
+    lb.set_interface_version(&t.admin, &1);
+    assert!(t.client.credit(&t.market, &user, &5_000_000));
+    assert_eq!(xlm_client.balance(&referrer), 5_000_000);
+}
+
+#[test]
+fn test_credit_rejects_missing_leaderboard_version() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "BetFan"),
+        &Some(referrer.clone()),
+    );
+
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128);
+
+    let no_version = t.env.register(NoVersionContract, ());
+    t.env.as_contract(&t.referral_id, || {
+        t.env
+            .storage()
+            .instance()
+            .set(&DataKey::LeaderboardContract, &no_version);
+    });
+
+    let r = t.client.try_credit(&t.market, &user, &5_000_000);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, ReferralError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    // Fail closed BEFORE the fee transfer.
+    let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
+    assert_eq!(xlm_client.balance(&referrer), 0);
 }

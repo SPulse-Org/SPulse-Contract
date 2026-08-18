@@ -1,5 +1,17 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::Address as _,
+    {Env, String},
+};
+
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
 
 fn setup() -> (
     Env,
@@ -11,6 +23,11 @@ fn setup() -> (
     let env = Env::default();
     env.mock_all_auths();
     env.cost_estimate().budget().reset_unlimited();
+    // Filling the top-50 list touches >100 unique ledger entries within a
+    // single add_pts call (bubble-up swaps), which exceeds the mainnet
+    // footprint limit the test harness enforces by default. This is expected
+    // test-only load, so disable the invocation resource limits.
+    env.cost_estimate().disable_resource_limits();
 
     let contract_id = env.register(LeaderboardContract, ());
     let client = LeaderboardContractClient::new(&env, &contract_id);
@@ -325,4 +342,104 @@ fn test_reward_updates_points_and_winloss() {
     assert_eq!(s.won_bets, 1);
     assert_eq!(s.lost_bets, 1);
     assert_eq!(s.total_bets, 2);
+}
+
+// ── Upgrade Coordination: leaderboard → PULSE token mint ─────────────────────
+
+fn setup_with_token(
+    env: &Env,
+    client: &LeaderboardContractClient<'static>,
+    admin: &Address,
+) -> pulse_token::PULSETokenContractClient<'static> {
+    let token_id = env.register(pulse_token::PULSETokenContract, ());
+    let tclient = pulse_token::PULSETokenContractClient::new(env, &token_id);
+    tclient.initialize(
+        admin,
+        &String::from_str(env, "PULSE"),
+        &String::from_str(env, "PLSE"),
+        &7u32,
+    );
+    // The leaderboard mints internally, so it must be an authorized minter.
+    tclient.set_minter(&client.address);
+    assert_eq!(tclient.interface_version(), 1);
+    tclient
+}
+
+#[test]
+fn test_reward_mints_token_when_interface_compatible() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    let user = Address::generate(&env);
+    client.reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+
+    let s = client.get_stats(&user);
+    assert_eq!(s.points, 30);
+    assert_eq!(s.won_bets, 1);
+    assert_eq!(tclient.balance(&user), 10_0000000);
+}
+
+#[test]
+fn test_reward_rejects_incompatible_token_version() {
+    let (env, client, admin, market, _referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    // Simulate an uncoordinated upgrade: the token's mint ABI is new but its
+    // declared interface version was dropped to 0. reward must fail closed
+    // with IncompatibleInterface BEFORE awarding points or minting.
+    tclient.set_interface_version(&0);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+
+    // Fail closed: no points were granted by the rejected call.
+    assert_eq!(client.get_points(&user), 0);
+    let s = client.get_stats(&user);
+    assert_eq!(s.points, 0);
+    assert_eq!(s.total_bets, 0);
+}
+
+#[test]
+fn test_reward_rejects_missing_token_version() {
+    let (env, client, admin, market, _referral) = setup();
+    // A token that never exposes interface_version (pre-this-scheme contract).
+    let no_version = env.register(NoVersionContract, ());
+    client.set_token(&admin, &no_version);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward(&market, &user, &30_u64, &10_0000000_i128, &true);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::InterfaceVersionMissing),
+        other => panic!("expected InterfaceVersionMissing, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+}
+
+#[test]
+fn test_reward_bonus_rejects_incompatible_token_version() {
+    let (env, client, admin, _market, referral) = setup();
+    let tclient = setup_with_token(&env, &client, &admin);
+    client.set_token(&admin, &tclient.address);
+
+    tclient.set_interface_version(&0);
+
+    let user = Address::generate(&env);
+    let r = client.try_reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    match r {
+        Err(Ok(e)) => assert_eq!(e, LeaderboardError::IncompatibleInterface),
+        other => panic!("expected IncompatibleInterface, got {other:?}"),
+    }
+    assert_eq!(client.get_points(&user), 0);
+
+    // Coordinated recovery: re-declare the version; bonus proceeds normally.
+    tclient.set_interface_version(&1);
+    client.reward_bonus(&referral, &user, &5_u64, &10_0000000_i128);
+    assert_eq!(client.get_points(&user), 5);
+    assert_eq!(tclient.balance(&user), 10_0000000);
 }
