@@ -4,6 +4,14 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String,
 };
 
+// ── Interface versioning (upgrade coordination) ──────────────────────────────
+// INTERFACE_VERSION identifies the ABI this contract exposes to its callers
+// (the leaderboard invokes mint). It MUST be bumped in the source AND
+// committed to storage via set_interface_version() on every incompatible ABI
+// change, so callers can fail closed instead of executing against a mismatched
+// ABI. Non-zero means the contract declares a version; 0 means uncoordinated.
+const INTERFACE_VERSION: u32 = 1;
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -59,6 +67,9 @@ impl PULSETokenContract {
         env.storage().instance().set(&DataKey::Symbol, &symbol);
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::TotalSupply, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
     }
 
@@ -92,6 +103,40 @@ impl PULSETokenContract {
         env.storage()
             .persistent()
             .remove(&DataKey::AuthorizedMinter(minter));
+        Ok(())
+    }
+
+    // ── Interface Versioning (upgrade coordination) ──────────────────────
+    // This contract is invoked cross-contract (leaderboard calls mint), so it
+    // exposes a stable interface version that callers verify before invoking.
+
+    /// Read this contract's current interface version.
+    ///
+    /// `0` means the contract has no declared version (a legacy deployment
+    /// that was never migrated via `set_interface_version`, or an
+    /// uninitialized contract). Callers treat `0` as incompatible with any
+    /// positive requirement — this is the fail-closed behavior for
+    /// uncoordinated deployments.
+    pub fn interface_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InterfaceVersion)
+            .unwrap_or(0)
+    }
+
+    /// Declare this contract's interface version. Admin only.
+    ///
+    /// Required after an in-place WASM upgrade that changes the `mint` ABI the
+    /// leaderboard relies on: bump `INTERFACE_VERSION` in the new source and
+    /// commit the new value here. Until this is done, upgraded callers that
+    /// require the newer version will fail closed with `IncompatibleInterface`
+    /// instead of silently executing against an uncoordinated ABI.
+    pub fn set_interface_version(env: Env, version: u32) -> Result<(), TokenError> {
+        let admin: Address = Self::require_admin(&env)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &version);
         Ok(())
     }
 

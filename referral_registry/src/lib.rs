@@ -1,13 +1,23 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val,
+    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Error,
+    IntoVal, String, Symbol, Val,
 };
 
 const WELCOME_BONUS_POINTS: u64 = 5;
 const WELCOME_BONUS_TOKENS: i128 = 1_0000000;
 const REFERRAL_BET_POINTS: u64 = 3;
+
+// ── Interface versioning (upgrade coordination) ──────────────────────────────
+// INTERFACE_VERSION identifies the ABI this contract exposes to its callers.
+// It MUST be bumped in the source AND committed to storage via
+// set_interface_version() on every incompatible ABI change, so upstream
+// callers can fail closed instead of executing against a mismatched ABI.
+const INTERFACE_VERSION: u32 = 1;
+// Minimum interface version required from the leaderboard before invoking
+// reward_bonus (register_referral) or add_bonus_pts (credit).
+const LEADERBOARD_BONUS_INTERFACE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -19,6 +29,11 @@ pub enum ReferralError {
     AlreadyRegistered = 4,
     SelfReferral = 5,
     NotAdmin = 6,
+    // ── Interface versioning (upgrade coordination) ────────────────────────
+    // The target contract does not expose the interface_version() function.
+    InterfaceVersionMissing = 7,
+    // The target contract's interface version is below the required minimum.
+    IncompatibleInterface = 8,
 }
 
 #[contracttype]
@@ -42,6 +57,8 @@ pub enum DataKey {
     TokenContract,
     LeaderboardContract,
     XlmSacContract,
+    // ── Interface versioning (upgrade coordination) ───────────────────────
+    InterfaceVersion, // u32 — current interface version of this contract
 }
 
 // Lever A: packed registrant profile — one storage slot instead of three.
@@ -82,6 +99,9 @@ impl ReferralRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::XlmSacContract, &xlm_sac);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
     }
 
@@ -109,6 +129,45 @@ impl ReferralRegistryContract {
         Ok(())
     }
 
+    // ── Interface Versioning (upgrade coordination) ──────────────────────
+    // Every contract that participates in cross-contract calls exposes a
+    // stable interface version. Callers read it and refuse to invoke a
+    // dependency whose version is below the minimum they require.
+
+    /// Read this contract's current interface version.
+    ///
+    /// `0` means the contract has no declared version (a legacy deployment
+    /// that was never migrated via `set_interface_version`, or an
+    /// uninitialized contract). Callers treat `0` as incompatible with any
+    /// positive requirement — this is the fail-closed behavior for
+    /// uncoordinated deployments.
+    pub fn interface_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InterfaceVersion)
+            .unwrap_or(0)
+    }
+
+    /// Declare this contract's interface version. Admin only.
+    ///
+    /// Required after an in-place WASM upgrade that changes any ABI another
+    /// contract calls: bump `INTERFACE_VERSION` in the new source and commit
+    /// the new value here. Until this is done, upgraded callers that require
+    /// the newer version will fail closed with `IncompatibleInterface` instead
+    /// of silently executing against an uncoordinated ABI.
+    pub fn set_interface_version(
+        env: Env,
+        admin: Address,
+        version: u32,
+    ) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &version);
+        Ok(())
+    }
+
     pub fn register_referral(
         env: Env,
         user: Address,
@@ -124,6 +183,17 @@ impl ReferralRegistryContract {
                 return Err(ReferralError::SelfReferral);
             }
         }
+        // Upgrade coordination: verify the leaderboard exposes a compatible
+        // `reward_bonus` interface BEFORE writing the profile or any state,
+        // so a unilateral incompatible upgrade fails the whole call atomically
+        // instead of registering the user and only then failing the bonus.
+        let leaderboard: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LeaderboardContract)
+            .unwrap();
+        Self::require_interface_version(&env, &leaderboard, LEADERBOARD_BONUS_INTERFACE_VERSION)?;
+
         // Lever A: write ONE packed Profile entry (display_name + referrer)
         // instead of the three legacy keys (Registered + DisplayName + Referrer).
         // Existence of Profile(user) is what is_registered() now checks.
@@ -147,11 +217,8 @@ impl ReferralRegistryContract {
         }
 
         let this = env.current_contract_address();
-        let leaderboard: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::LeaderboardContract)
-            .unwrap();
+        // Upgrade coordination: the leaderboard was already verified to expose
+        // a compatible `reward_bonus` interface before the profile was written.
         let _: Val = env.invoke_contract(
             &leaderboard,
             &Symbol::new(&env, "reward_bonus"),
@@ -178,6 +245,21 @@ impl ReferralRegistryContract {
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
         match referrer {
             Some(ref_addr) => {
+                let leaderboard: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::LeaderboardContract)
+                    .unwrap();
+                // Upgrade coordination: verify the leaderboard exposes a
+                // compatible `add_bonus_pts` interface BEFORE transferring the
+                // fee or writing any state, so a unilateral incompatible
+                // upgrade fails the whole call atomically instead of paying the
+                // referrer and only then discovering the ABI mismatch.
+                Self::require_interface_version(
+                    &env,
+                    &leaderboard,
+                    LEADERBOARD_BONUS_INTERFACE_VERSION,
+                )?;
                 let xlm_sac: Address = env
                     .storage()
                     .instance()
@@ -188,11 +270,6 @@ impl ReferralRegistryContract {
                     &ref_addr,
                     &referral_fee,
                 );
-                let leaderboard: Address = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::LeaderboardContract)
-                    .unwrap();
                 let _: Val = env.invoke_contract(
                     &leaderboard,
                     &Symbol::new(&env, "add_bonus_pts"),
@@ -304,6 +381,32 @@ impl ReferralRegistryContract {
             .ok_or(ReferralError::NotInitialized)?;
         if *caller != market {
             return Err(ReferralError::UnauthorizedCaller);
+        }
+        Ok(())
+    }
+
+    // ── Interface versioning helpers (upgrade coordination) ──────────────
+    // Reads `interface_version()` on the target contract and fails closed with
+    // a typed error when the target does not expose the function
+    // (InterfaceVersionMissing) or reports a version below the required
+    // minimum (IncompatibleInterface). Uses try_invoke_contract so a missing
+    // function or panicking target is caught deterministically instead of
+    // aborting with a generic host panic.
+    fn require_interface_version(
+        env: &Env,
+        target: &Address,
+        required: u32,
+    ) -> Result<(), ReferralError> {
+        let version: u32 = match env.try_invoke_contract::<u32, Error>(
+            target,
+            &Symbol::new(env, "interface_version"),
+            vec![&env],
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) | Err(_) => return Err(ReferralError::InterfaceVersionMissing),
+        };
+        if version < required {
+            return Err(ReferralError::IncompatibleInterface);
         }
         Ok(())
     }

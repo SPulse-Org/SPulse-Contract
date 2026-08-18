@@ -1,5 +1,6 @@
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -26,6 +27,11 @@ fn setup() -> TestSetup {
     let env = Env::default();
     env.mock_all_auths();
     env.cost_estimate().budget().reset_unlimited();
+    // Heavy tests (e.g. legacy bettor-index reads that materialize >100
+    // distinct ledger keys, spam-guard loops) exceed the mainnet footprint
+    // limits the test harness enforces by default. Disable the invocation
+    // resource limits — assertions are unaffected.
+    env.cost_estimate().disable_resource_limits();
 
     env.ledger().set(LedgerInfo {
         timestamp: 1_000_000,
@@ -705,7 +711,8 @@ fn test_reject_drain_entire_accumulator_in_one_request() {
     t.client.add_fee_recipient(&t.admin, &recipient);
 
     let fees = t.client.get_accumulated_fees();
-    t.client.request_withdraw_fees(&recipient, &recipient, &fees);
+    t.client
+        .request_withdraw_fees(&recipient, &recipient, &fees);
 }
 
 // ── 27e. Payout is locked until the timelock elapses (issue #12) ──────────────
@@ -837,14 +844,14 @@ fn test_bettor_index_legacy_read_is_bounded() {
 
     // Simulate a large legacy index without spending time creating 101 bets.
     t.env.as_contract(&t.client.address, || {
-        t.env.storage().persistent().set(
-            &DataKey::BettorCount(id),
-            &(MAX_BETTORS_PER_PAGE + 1),
-        );
-        t.env.storage().persistent().set(
-            &DataKey::BettorAt(id, 0),
-            &first,
-        );
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorCount(id), &(MAX_BETTORS_PER_PAGE + 1));
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorAt(id, 0), &first);
         t.env.storage().persistent().set(
             &DataKey::BettorAt(id, MAX_BETTORS_PER_PAGE),
             &beyond_first_page,
@@ -895,7 +902,9 @@ fn test_reject_too_many_bets() {
     fund_user(&t, &user, 100_000_000_000);
 
     for _ in 0..=20u32 {
-        t.client.place_bet(&user, &id, &true, &1_0000000_i128);
+        // 1.1 XLM gross → net 1.078 XLM clears MIN_BET; the spam guard
+        // (TooManyBets, #17) must fire on the 21st bet only.
+        t.client.place_bet(&user, &id, &true, &11_0000000_i128);
     }
 }
 
@@ -1301,10 +1310,10 @@ fn test_many_winners_payouts_exact_and_dust_swept() {
     let w2 = Address::generate(&t.env);
     let w3 = Address::generate(&t.env);
     let l1 = Address::generate(&t.env);
-    fund_user(&t, &w1, 1_000_0000000);
-    fund_user(&t, &w2, 1_000_0000000);
-    fund_user(&t, &w3, 1_000_0000000);
-    fund_user(&t, &l1, 1_000_0000000);
+    fund_user(&t, &w1, 10_000_000_000);
+    fund_user(&t, &w2, 10_000_000_000);
+    fund_user(&t, &w3, 10_000_000_000);
+    fund_user(&t, &l1, 10_000_000_000);
 
     // Deliberately uneven stakes that do NOT divide the pool evenly.
     t.client.place_bet(&w1, &id, &true, &30_000_001_i128);
@@ -1349,11 +1358,11 @@ fn test_many_winners_payouts_exact_and_dust_swept() {
     t.client.claim(&w1, &id);
     t.client.claim(&w2, &id);
     t.client.claim(&w3, &id);
+    assert_eq!(bal_before - t.xlm.balance(&market_contract), p1 + p2 + p3);
     assert_eq!(
-        bal_before - t.xlm.balance(&market_contract),
-        p1 + p2 + p3
+        t.xlm.balance(&w1),
+        10_000_000_000_i128 - 30_000_001_i128 + p1
     );
-    assert_eq!(t.xlm.balance(&w1), 1_000_0000000_i128 - 30_000_001_i128 + p1);
 }
 
 // ── #2: single winner receives the whole pool (no dust) ─────────────────────
@@ -1363,8 +1372,8 @@ fn test_single_winner_gets_whole_net_pool() {
     let id = create_test_market(&t);
     let winner = Address::generate(&t.env);
     let loser = Address::generate(&t.env);
-    fund_user(&t, &winner, 1_000_0000000);
-    fund_user(&t, &loser, 1_000_0000000);
+    fund_user(&t, &winner, 10_000_000_000);
+    fund_user(&t, &loser, 10_000_000_000);
 
     t.client.place_bet(&winner, &id, &true, &60_0000000_i128);
     t.client.place_bet(&loser, &id, &false, &60_0000000_i128);
@@ -1416,8 +1425,9 @@ fn test_claim_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let before_bet = ttl(&bet_key);
     let before_market = ttl(&market_key);
@@ -1445,8 +1455,9 @@ fn test_cancel_refund_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let bet_before = ttl(&bet_key);
     let market_before = ttl(&market_key);
@@ -1455,4 +1466,154 @@ fn test_cancel_refund_rebumps_ttl_entries() {
 
     assert!(ttl(&bet_key) > bet_before);
     assert!(ttl(&market_key) > market_before);
+}
+
+// ── Upgrade Coordination (cross-contract interface versioning) ────────────────
+// Every cross-contract invoke is preceded by a require_interface_version() check
+// on the target. These tests prove each dependency fails closed (Incompatible
+// #27 / Missing #26) when its declared interface version is stale or absent,
+// and that a coordinated re-declaration recovers the system.
+
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
+
+fn assert_market_error(
+    r: Result<
+        Result<(), soroban_sdk::ConversionError>,
+        Result<MarketError, soroban_sdk::InvokeError>,
+    >,
+    expected: MarketError,
+) {
+    match r {
+        Err(Ok(e)) => assert_eq!(e, expected),
+        other => panic!("expected {expected:?}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_place_bet_rejects_incompatible_referral_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // Simulate an uncoordinated upgrade: referral registry still runs but its
+    // declared interface version (dropped to 0) no longer satisfies the
+    // market's required `credit` ABI (>= 1).
+    t.referral_client.set_interface_version(&t.admin, &0);
+
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::IncompatibleInterface,
+    );
+}
+
+#[test]
+fn test_place_bet_rejects_missing_referral_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    // A deployment that never exposed `interface_version` (e.g. a contract
+    // upgraded from before this scheme existed). Fails closed as Missing.
+    let no_version = t.env.register(NoVersionContract, ());
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &no_version,
+        &t.leaderboard_client.address,
+        &t.xlm.address,
+    );
+
+    assert_market_error(
+        t.client.try_place_bet(&user, &id, &true, &100_0000000_i128),
+        MarketError::InterfaceVersionMissing,
+    );
+}
+
+#[test]
+fn test_claim_rejects_incompatible_leaderboard_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Leaderboard's declared version is stale (uncoordinated upgrade).
+    t.leaderboard_client.set_interface_version(&t.admin, &0);
+
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+}
+
+#[test]
+fn test_claim_rejects_missing_leaderboard_version() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Leaderboard never exposed `interface_version`.
+    let no_version = t.env.register(NoVersionContract, ());
+    t.client.set_config(
+        &t.admin,
+        &t.token_client.address,
+        &t.referral_client.address,
+        &no_version,
+        &t.xlm.address,
+    );
+
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::InterfaceVersionMissing,
+    );
+}
+
+#[test]
+fn test_unilateral_upgrade_fails_closed_then_recovers() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    // Uncoordinated leaderboard upgrade: new WASM is live but its declared
+    // version was not recommitted (dropped to 0 here, same as a fresh install
+    // that never ran set_interface_version). Every claim must fail closed and,
+    // crucially, must NOT consume the bet.
+    t.leaderboard_client.set_interface_version(&t.admin, &0);
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+    assert_market_error(
+        t.client.try_claim(&user, &id),
+        MarketError::IncompatibleInterface,
+    );
+
+    // Coordinated recovery: admin declares the new interface version; claims
+    // resume with no redeployment and no data migration.
+    t.leaderboard_client.set_interface_version(&t.admin, &1);
+    t.client.claim(&user, &id);
+
+    assert_eq!(t.xlm.balance(&user), 198_0000000);
+    assert_eq!(t.token_client.balance(&user), 10_0000000);
 }
