@@ -1,8 +1,9 @@
 use super::*;
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
+    symbol_short,
+    testutils::{storage::Persistent as _, Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Env, String,
+    Env, IntoVal, String,
 };
 
 use leaderboard::LeaderboardContract;
@@ -1103,7 +1104,7 @@ fn test_create_multiple_markets() {
     assert_eq!(t.client.get_market(&id2).category, Category::Sports);
 }
 
-// ── 41. Empty-side resolution: pool goes to AccumulatedFees, admin can withdraw ─
+// ── 41. Empty-side resolution: principal is NOT swept into AccumulatedFees ─
 
 #[test]
 fn test_empty_side_resolution_pool_to_fees() {
@@ -1121,30 +1122,25 @@ fn test_empty_side_resolution_pool_to_fees() {
     advance_time(&t.env, 3601);
     t.client.resolve_market(&t.admin, &id, &false); // total_no == 0
 
-    // The entire pool (total_yes net = 98 XLM) must be swept into AccumulatedFees
+    // Principal stays in a per-market ForfeitedPool, not AccumulatedFees.
+    // This market's fees are locked for the dispute window.
     let fees_after = t.client.get_accumulated_fees();
-    assert_eq!(
-        fees_after,
-        fees_before + 98_0000000,
-        "entire YES pool should sweep to fees when NO side is empty"
+    assert_eq!(fees_after, 0, "zero-side pool must not mix into withdrawable fees");
+    let fp = t.client.get_forfeited_pool(&id).expect("forfeited pool");
+    assert_eq!(fp.amount, 98_0000000);
+    assert_eq!(fp.locked_fees, 2_0000000);
+    assert!(!fp.frozen);
+    assert_eq!(t.client.get_payout(&id, &alice), 98_0000000);
+
+    let topics = soroban_sdk::vec![
+        &t.env,
+        symbol_short!("zero_side").into_val(&t.env),
+        id.into_val(&t.env),
+    ];
+    assert!(
+        t.env.events().all().iter().any(|e| e.1 == topics),
+        "zero-side resolution must emit a monitorable event"
     );
-
-    // Admin can withdraw the swept pool to a registered treasury
-    let treasury = Address::generate(&t.env);
-    t.client.add_fee_recipient(&t.admin, &treasury);
-    let before = t.xlm.balance(&treasury);
-    let withdrawn = t.client.withdraw_fees(&t.admin, &treasury);
-    assert_eq!(withdrawn, fees_after);
-    assert_eq!(t.xlm.balance(&treasury), before + fees_after);
-    assert_eq!(t.client.get_accumulated_fees(), 0);
-
-    // Alice (was YES, losing side) can still claim — gets PULSE tokens + points
-    t.client.claim(&alice, &id);
-    let bet = t.client.get_bet(&id, &alice);
-    assert!(bet.claimed);
-    // Gets lose-tier rewards because winning_side == 0
-    assert_eq!(t.token_client.balance(&alice), 2_0000000); // LOSE_TOKENS
-    assert_eq!(t.leaderboard_client.get_points(&alice), 10); // LOSE_POINTS
 }
 
 // ── 42. Cancel accumulates fees on multiple bets correctly ────────────────────
@@ -1455,4 +1451,166 @@ fn test_cancel_refund_rebumps_ttl_entries() {
 
     assert!(ttl(&bet_key) > bet_before);
     assert!(ttl(&market_key) > market_before);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY REGRESSION SUITE — issue #3 (zero-side sweep / fund theft)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_two_sided_resolution_unaffected_by_zero_side_guards() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
+    let fees = t.client.get_accumulated_fees();
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    assert!(t.client.get_forfeited_pool(&id).is_none());
+    assert_eq!(t.client.get_accumulated_fees(), fees);
+
+    let alice_pre = t.xlm.balance(&alice);
+    t.client.claim(&alice, &id);
+    assert_eq!(t.xlm.balance(&alice) - alice_pre, 196_0000000);
+}
+
+#[test]
+fn test_one_sided_win_returns_net_immediately() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    assert!(t.client.get_forfeited_pool(&id).is_none());
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
+
+    let alice_pre = t.xlm.balance(&alice);
+    t.client.claim(&alice, &id);
+    assert_eq!(t.xlm.balance(&alice) - alice_pre, 98_0000000);
+    assert_eq!(t.token_client.balance(&alice), 10_0000000); // WIN_TOKENS
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_zero_side_claim_blocked_during_dispute_window() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+    t.client.claim(&alice, &id);
+}
+
+#[test]
+fn test_zero_side_claim_refunds_principal_after_dispute_window() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+
+    advance_time(&t.env, DISPUTE_WINDOW_SECS);
+    let alice_pre = t.xlm.balance(&alice);
+    t.client.claim(&alice, &id);
+    assert_eq!(t.xlm.balance(&alice) - alice_pre, 98_0000000);
+    assert_eq!(t.token_client.balance(&alice), 2_0000000); // LOSE_TOKENS
+    assert_eq!(t.leaderboard_client.get_points(&alice), 10);
+    // First claim after the window releases locked platform fees.
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
+    assert_eq!(t.client.get_forfeited_pool(&id).unwrap().locked_fees, 0);
+}
+
+#[test]
+fn test_zero_side_withdraw_fees_cannot_drain_principal() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+
+    // During the window the market's fees are locked, so there is nothing
+    // to withdraw — and the 98 XLM principal is not in the accumulator.
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+
+    advance_time(&t.env, DISPUTE_WINDOW_SECS);
+    t.client.finalize_zero_side(&id);
+    let fees = t.client.get_accumulated_fees();
+    assert_eq!(fees, 2_0000000, "only the genuine 2% fee is withdrawable");
+
+    let treasury = Address::generate(&t.env);
+    t.client.add_fee_recipient(&t.admin, &treasury);
+    let withdrawn = t.client.withdraw_fees(&t.admin, &treasury);
+    assert_eq!(withdrawn, 2_0000000);
+    assert_eq!(t.xlm.balance(&treasury), 2_0000000);
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+}
+
+#[test]
+fn test_freeze_zero_side_during_dispute_refunds_gross() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    let alice_before = t.xlm.balance(&alice);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+
+    t.client.freeze_market(&t.admin, &id);
+    let fp = t.client.get_forfeited_pool(&id).unwrap();
+    assert!(fp.frozen);
+    assert!(t.client.get_market(&id).cancelled);
+
+    let refunded = t.client.cancel_refund(&alice, &id);
+    assert_eq!(refunded, 100_0000000);
+    assert_eq!(t.xlm.balance(&alice), alice_before);
+    // Frozen fees never rejoin AccumulatedFees.
+    assert_eq!(t.client.get_accumulated_fees(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_reject_freeze_after_dispute_window() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+    advance_time(&t.env, DISPUTE_WINDOW_SECS);
+    t.client.freeze_market(&t.admin, &id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_reject_freeze_two_sided_market() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+    t.client.freeze_market(&t.admin, &id);
 }
