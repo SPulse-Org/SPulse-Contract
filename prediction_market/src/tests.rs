@@ -59,6 +59,7 @@ fn setup() -> TestSetup {
         &String::from_str(&env, "PULSE"),
         &String::from_str(&env, "PLSE"),
         &7u32,
+        &1_000_000_000_000_000_i128,
     );
 
     let leaderboard_id = env.register(LeaderboardContract, ());
