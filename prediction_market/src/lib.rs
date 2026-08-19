@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -30,6 +30,10 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // accumulator to an arbitrary address in one call.
 const WITHDRAW_DELAY_SECS: u64 = 86_400; // 24h timelock between request and payout
 const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated fees
+
+// Issue #3: zero-side resolutions get a short challenge window before
+// principal is paid out and this market's fees become withdrawable.
+const DISPUTE_WINDOW_SECS: u64 = 86_400;
 
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
@@ -67,7 +71,10 @@ pub enum MarketError {
     NoWithdrawalRequest = 24,
     WithdrawalTooSoon = 25,
     ContractPaused = 26,
-    InvalidDuration = 26, // issue #10: duration below the minimum
+    InvalidDuration = 27, // issue #10: duration below the minimum
+    DisputePending = 28,
+    NoZeroSideResolution = 29,
+    DisputeWindowClosed = 30,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -91,6 +98,8 @@ pub enum DataKey {
     Payout(u64, Address), // i128 — exact payout computed at resolve time
     // ── Timelocked withdrawal requests (issue #12) ───────────────────────
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
+    // ── Zero-side provenance (issue #3) ──────────────────────────────────
+    ForfeitedPool(u64), // per-market ForfeitedPool; never mixed into fees
     // ── Emergency circuit-breaker (issue #83) ─────────────────────────────
     Paused,
 }
@@ -123,6 +132,17 @@ pub struct WithdrawalRequest {
     pub recipient: Address,
     pub amount: i128,
     pub requested_at: u64,
+}
+
+// Per-market swept principal + sequestered fees (issue #3). Kept out of
+// AccumulatedFees so a resolver/fee-recipient cannot withdraw user funds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForfeitedPool {
+    pub amount: i128,      // net principal owed back to the losing side
+    pub locked_fees: i128, // this market's fees, held until dispute ends
+    pub resolved_at: u64,
+    pub frozen: bool,
 }
 
 // ── Domain Structs ────────────────────────────────────────────────────────────
@@ -576,11 +596,60 @@ impl PredictionMarketContract {
             .unwrap_or(0);
 
         if winning_side == 0 {
-            // No contest on the winning side — the whole pool is swept to
-            // accumulated fees (protocol-defined behavior, kept from prior
-            // design). Bettors still earn tokens/points via claim().
+            // Issue #3: do not sweep user principal into AccumulatedFees.
+            // Credit each bettor their net back via the payout ledger, lock
+            // this market's fees out of the withdrawable accumulator, and
+            // open a dispute window before any of that money can move.
             if total_pool > 0 {
-                acc_fees += total_pool;
+                let fees_in_pool = total_pool * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS);
+                let locked = if fees_in_pool < acc_fees {
+                    fees_in_pool
+                } else {
+                    acc_fees
+                };
+                acc_fees -= locked;
+
+                let bettors: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::BettorCount(market_id))
+                    .unwrap_or(0);
+                for i in 0..bettors {
+                    let slot_key = DataKey::BettorAt(market_id, i);
+                    let bettor: Address =
+                        if let Some(a) = env.storage().persistent().get(&slot_key) {
+                            a
+                        } else {
+                            continue;
+                        };
+                    let bet_key = DataKey::Bet(market_id, bettor.clone());
+                    if let Some(entry) =
+                        env.storage().persistent().get::<DataKey, BetEntry>(&bet_key)
+                    {
+                        let payout_key = DataKey::Payout(market_id, bettor.clone());
+                        env.storage().persistent().set(&payout_key, &entry.net);
+                        env.storage()
+                            .persistent()
+                            .extend_ttl(&payout_key, TTL_BUMP, TTL_HIGH);
+                    }
+                }
+
+                let fp_key = DataKey::ForfeitedPool(market_id);
+                env.storage().persistent().set(
+                    &fp_key,
+                    &ForfeitedPool {
+                        amount: total_pool,
+                        locked_fees: locked,
+                        resolved_at: env.ledger().timestamp(),
+                        frozen: false,
+                    },
+                );
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&fp_key, TTL_BUMP, TTL_HIGH);
+
+                env.events()
+                    .publish((symbol_short!("zero_side"), market_id), total_pool);
             }
         } else {
             // Settlement-time payouts (issue #2): compute EXACT per-winner
@@ -636,6 +705,78 @@ impl PredictionMarketContract {
             .persistent()
             .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
         Ok(())
+    }
+
+    // ── Zero-side dispute (issue #3) ──────────────────────────────────────
+    // A griefing empty-side resolution can be frozen by admin during the
+    // challenge window. After the window, anyone can finalize so this
+    // market's genuine platform fees rejoin AccumulatedFees.
+
+    pub fn freeze_market(env: Env, admin: Address, market_id: u64) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+
+        let mut market = Self::load_market(&env, market_id)?;
+        if market.cancelled {
+            return Err(MarketError::MarketCancelled);
+        }
+        if !market.resolved {
+            return Err(MarketError::MarketNotResolved);
+        }
+
+        let fp_key = DataKey::ForfeitedPool(market_id);
+        let mut pool: ForfeitedPool = env
+            .storage()
+            .persistent()
+            .get(&fp_key)
+            .ok_or(MarketError::NoZeroSideResolution)?;
+        if pool.frozen {
+            return Err(MarketError::MarketCancelled);
+        }
+        if Self::dispute_window_closed(&env, pool.resolved_at) {
+            return Err(MarketError::DisputeWindowClosed);
+        }
+
+        pool.frozen = true;
+        env.storage().persistent().set(&fp_key, &pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&fp_key, TTL_BUMP, TTL_HIGH);
+
+        // Route to the existing refund path: users pull GROSS via
+        // cancel_refund. Locked fees stay out of AccumulatedFees so the
+        // contract remains solvent for those refunds.
+        market.cancelled = true;
+        let mkt_key = DataKey::Market(market_id);
+        env.storage().persistent().set(&mkt_key, &market);
+        env.storage()
+            .persistent()
+            .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    pub fn finalize_zero_side(env: Env, market_id: u64) -> Result<(), MarketError> {
+        Self::load_market(&env, market_id)?;
+        let fp_key = DataKey::ForfeitedPool(market_id);
+        let mut pool: ForfeitedPool = env
+            .storage()
+            .persistent()
+            .get(&fp_key)
+            .ok_or(MarketError::NoZeroSideResolution)?;
+        if pool.frozen {
+            return Err(MarketError::MarketCancelled);
+        }
+        if !Self::dispute_window_closed(&env, pool.resolved_at) {
+            return Err(MarketError::DisputePending);
+        }
+        Self::release_locked_fees(&env, market_id, &mut pool);
+        Ok(())
+    }
+
+    pub fn get_forfeited_pool(env: Env, market_id: u64) -> Option<ForfeitedPool> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ForfeitedPool(market_id))
     }
 
     // ── Cancellation ──────────────────────────────────────────────────────
@@ -738,6 +879,9 @@ impl PredictionMarketContract {
         if !market.resolved {
             return Err(MarketError::MarketNotResolved);
         }
+        // Issue #3: zero-side principal cannot move until the dispute window
+        // closes (or the market is frozen into cancel_refund).
+        Self::enforce_zero_side_claim_window(&env, market_id)?;
 
         let bet_key = DataKey::Bet(market_id, user.clone());
         let mut entry: BetEntry = env
@@ -775,8 +919,8 @@ impl PredictionMarketContract {
         let this = env.current_contract_address();
 
         // XLM payout straight from the settlement-time payout ledger.
-        // Winners are exactly the bettors who own a Payout entry; everyone
-        // else (losers, empty winning side) has no payout key at all.
+        // Two-sided winners (and zero-side refunds) own a Payout entry;
+        // two-sided losers have no key at all.
         let payout: i128 = if let Some(p) = env
             .storage()
             .persistent()
@@ -786,7 +930,7 @@ impl PredictionMarketContract {
         } else {
             0
         };
-        if is_winner && payout > 0 {
+        if payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
 
@@ -1082,6 +1226,48 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::Market(market_id))
             .ok_or(MarketError::MarketNotFound)
+    }
+
+    fn dispute_window_closed(env: &Env, resolved_at: u64) -> bool {
+        let now = env.ledger().timestamp();
+        now >= resolved_at && now - resolved_at >= DISPUTE_WINDOW_SECS
+    }
+
+    fn release_locked_fees(env: &Env, market_id: u64, pool: &mut ForfeitedPool) {
+        if pool.frozen || pool.locked_fees <= 0 {
+            return;
+        }
+        let mut acc_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0);
+        acc_fees += pool.locked_fees;
+        pool.locked_fees = 0;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &acc_fees);
+        let fp_key = DataKey::ForfeitedPool(market_id);
+        env.storage().persistent().set(&fp_key, pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&fp_key, TTL_BUMP, TTL_HIGH);
+    }
+
+    fn enforce_zero_side_claim_window(env: &Env, market_id: u64) -> Result<(), MarketError> {
+        let fp_key = DataKey::ForfeitedPool(market_id);
+        let mut pool: ForfeitedPool = match env.storage().persistent().get(&fp_key) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if pool.frozen {
+            return Err(MarketError::MarketCancelled);
+        }
+        if !Self::dispute_window_closed(env, pool.resolved_at) {
+            return Err(MarketError::DisputePending);
+        }
+        Self::release_locked_fees(env, market_id, &mut pool);
+        Ok(())
     }
 
     #[inline]
