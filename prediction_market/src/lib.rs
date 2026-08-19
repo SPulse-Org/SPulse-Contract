@@ -88,6 +88,10 @@ pub enum MarketError {
     /// changed return type) always increments INTERFACE_VERSION in the same
     /// commit. See EXPECTED_REFERRAL_INTERFACE_VERSION / EXPECTED_LEADERBOARD_INTERFACE_VERSION.
     IncompatibleInterface = 28,
+    /// A state-mutating function was re-entered while a prior invocation was
+    /// still mid-flight (issue #72). Reentrant calls are rejected before any
+    /// external call can observe or mutate partially-updated state.
+    ReentrancyDetected = 29,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -113,6 +117,11 @@ pub enum DataKey {
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
     // ── Emergency circuit-breaker (issue #83) ─────────────────────────────
     Paused,
+    // ── Reentrancy guard (issue #72) ────────────────────────────────────────
+    // Instance-storage bool set while a guarded function is running and
+    // cleared on success. A reentrant call sees `true` and is rejected; an
+    // aborted call's write is rolled back with the rest of the transaction.
+    ReentrancyGuard,
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -422,6 +431,7 @@ impl PredictionMarketContract {
     ) -> Result<(), MarketError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+        Self::enter_reentrancy_guard(&env)?;
 
         let net = amount * NET_NUMERATOR / BPS_DENOM;
         if net < MIN_BET {
@@ -464,18 +474,75 @@ impl PredictionMarketContract {
         // OPT: one Config read instead of 4 separate instance reads
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
 
-        // ── XLM transfer user → this contract ────────────────────────────
-        let xlm = token::Client::new(&env, &cfg.xlm_sac);
-        let this = env.current_contract_address();
-        xlm.transfer(&user, &this, &amount);
+        // ── Effects first (check-effects-interaction, issue #72) ──────────
+        // Write every piece of state that does not depend on the outcome of
+        // the credit() call BEFORE any external call, so a reentrant call
+        // (which the guard already rejects) can never observe half-updated
+        // market state.
 
-        // ── Accumulated fees ──────────────────────────────────────────────
         let mut acc_fees: i128 = env
             .storage()
             .instance()
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0);
         acc_fees += platform_fee;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &acc_fees);
+
+        let new_entry = match existing {
+            Some(mut e) => {
+                e.net += net;
+                e.gross += amount;
+                e.count += 1;
+                e
+            }
+            None => BetEntry {
+                net,
+                gross: amount,
+                is_yes,
+                claimed: false,
+                count: 1,
+            },
+        };
+        env.storage().persistent().set(&bet_key, &new_entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+
+        // ── Bettor index (first bet only) ─────────────────────────────────
+        if !is_increase {
+            let cnt_key = DataKey::BettorCount(market_id);
+            let count: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0);
+            let slot_key = DataKey::BettorAt(market_id, count);
+            env.storage().persistent().set(&slot_key, &user);
+            env.storage()
+                .persistent()
+                .extend_ttl(&slot_key, TTL_BUMP, TTL_HIGH);
+            let new_count = count + 1;
+            env.storage().persistent().set(&cnt_key, &new_count);
+            env.storage()
+                .persistent()
+                .extend_ttl(&cnt_key, TTL_BUMP, TTL_HIGH);
+            market.bet_count += 1;
+        }
+
+        // ── Market totals ─────────────────────────────────────────────────
+        if is_yes {
+            market.total_yes += net;
+        } else {
+            market.total_no += net;
+        }
+        let mkt_key = DataKey::Market(market_id);
+        env.storage().persistent().set(&mkt_key, &market);
+        env.storage()
+            .persistent()
+            .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+
+        // ── Interactions last ─────────────────────────────────────────────
+        let xlm = token::Client::new(&env, &cfg.xlm_sac);
+        let this = env.current_contract_address();
+        xlm.transfer(&user, &this, &amount);
 
         // ── Referral (skip if cached no-referrer) ─────────────────────────
         let hr_key = DataKey::HasReferrer(user.clone());
@@ -505,63 +572,22 @@ impl PredictionMarketContract {
             result
         };
 
+        // The referral portion of the fee is the only post-call effect: it is
+        // unknowable until credit() reports whether a referrer was paid. The
+        // reentrancy guard makes this safe.
         if !paid_referrer {
+            let mut acc_fees: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::AccumulatedFees)
+                .unwrap_or(0);
             acc_fees += referral_fee;
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::AccumulatedFees, &acc_fees);
-
-        // ── Write BetEntry (net + gross + count in one write) ─────────────
-        let new_entry = match existing {
-            Some(mut e) => {
-                e.net += net;
-                e.gross += amount;
-                e.count += 1;
-                e
-            }
-            None => BetEntry {
-                net,
-                gross: amount,
-                is_yes,
-                claimed: false,
-                count: 1,
-            },
-        };
-        env.storage().persistent().set(&bet_key, &new_entry);
-        env.storage()
-            .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
-
-        // ── Bettor index (first bet only) ─────────────────────────────────
-        if !is_increase {
-            let cnt_key = DataKey::BettorCount(market_id);
-            let count: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0);
-            let slot_key = DataKey::BettorAt(market_id, count);
-            // OPT: no clone — user is moved here and we don't need it after
-            env.storage().persistent().set(&slot_key, &user);
             env.storage()
-                .persistent()
-                .extend_ttl(&slot_key, TTL_BUMP, TTL_HIGH);
-            let new_count = count + 1;
-            env.storage().persistent().set(&cnt_key, &new_count);
-            env.storage()
-                .persistent()
-                .extend_ttl(&cnt_key, TTL_BUMP, TTL_HIGH);
-            market.bet_count += 1;
+                .instance()
+                .set(&DataKey::AccumulatedFees, &acc_fees);
         }
 
-        // ── Market totals ─────────────────────────────────────────────────
-        if is_yes {
-            market.total_yes += net;
-        } else {
-            market.total_no += net;
-        }
-        let mkt_key = DataKey::Market(market_id);
-        env.storage().persistent().set(&mkt_key, &market);
-        env.storage()
-            .persistent()
-            .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Self::exit_reentrancy_guard(&env);
         Ok(())
     }
 
@@ -708,6 +734,7 @@ impl PredictionMarketContract {
 
     pub fn cancel_refund(env: Env, user: Address, market_id: u64) -> Result<i128, MarketError> {
         user.require_auth();
+        Self::enter_reentrancy_guard(&env)?;
 
         let market = Self::load_market(&env, market_id)?;
         if !market.cancelled {
@@ -747,6 +774,7 @@ impl PredictionMarketContract {
             &gross,
         );
 
+        Self::exit_reentrancy_guard(&env);
         Ok(gross)
     }
 
@@ -756,6 +784,7 @@ impl PredictionMarketContract {
     pub fn claim(env: Env, user: Address, market_id: u64) -> Result<(), MarketError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+        Self::enter_reentrancy_guard(&env)?;
 
         let market = Self::load_market(&env, market_id)?;
         if market.cancelled {
@@ -839,6 +868,7 @@ impl PredictionMarketContract {
             ],
         );
 
+        Self::exit_reentrancy_guard(&env);
         Ok(())
     }
 
@@ -858,6 +888,7 @@ impl PredictionMarketContract {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         Self::require_valid_fee_recipient(&env, &caller, &recipient)?;
+        Self::enter_reentrancy_guard(&env)?;
 
         let fees: i128 = env
             .storage()
@@ -868,6 +899,13 @@ impl PredictionMarketContract {
             return Err(MarketError::NoFeesToWithdraw);
         }
 
+        // Effects before interaction (issue #72): zero the accumulator before
+        // the external transfer so a reentrant recipient can never observe
+        // stale fees (the guard already rejects reentrancy — defense in depth).
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &0_i128);
+
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         token::Client::new(&env, &cfg.xlm_sac).transfer(
             &env.current_contract_address(),
@@ -875,9 +913,7 @@ impl PredictionMarketContract {
             &fees,
         );
 
-        env.storage()
-            .instance()
-            .set(&DataKey::AccumulatedFees, &0_i128);
+        Self::exit_reentrancy_guard(&env);
         Ok(fees)
     }
 
@@ -937,6 +973,7 @@ impl PredictionMarketContract {
     pub fn execute_withdraw_fees(env: Env, caller: Address) -> Result<i128, MarketError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
+        Self::enter_reentrancy_guard(&env)?;
         let key = DataKey::PendingWithdrawal(caller.clone());
         let req: WithdrawalRequest = env
             .storage()
@@ -973,6 +1010,7 @@ impl PredictionMarketContract {
             &req.amount,
         );
 
+        Self::exit_reentrancy_guard(&env);
         Ok(req.amount)
     }
 
@@ -1142,6 +1180,32 @@ impl PredictionMarketContract {
             return Err(MarketError::ContractPaused);
         }
         Ok(())
+    }
+
+    // Issue #72: a single-bool reentrancy guard. Set before a state-mutating
+    // function performs an external call, cleared on the success path. A
+    // reentrant call that re-enters while the guard is held fails with
+    // ReentrancyDetected, which reverts the whole transaction (Soroban is
+    // atomic), so no partial state can be observed. The guard lives in
+    // instance storage; if the outer call reverts, the rollback clears it
+    // automatically, so it can never stay "locked".
+    #[inline]
+    fn enter_reentrancy_guard(env: &Env) -> Result<(), MarketError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::ReentrancyGuard)
+            .unwrap_or(false)
+        {
+            return Err(MarketError::ReentrancyDetected);
+        }
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        Ok(())
+    }
+
+    #[inline]
+    fn exit_reentrancy_guard(env: &Env) {
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &false);
     }
 
     #[inline]

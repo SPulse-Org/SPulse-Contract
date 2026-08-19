@@ -1824,3 +1824,50 @@ fn test_cancel_withdrawal_request_still_works_while_paused() {
 
     assert!(t.client.get_pending_withdrawal(&recipient).is_none());
 }
+
+// ── Reentrancy guard (issue #72) ────────────────────────────────────────────
+//
+// A malicious referral contract re-enters place_bet from inside credit(). The
+// nested call must fail before it can observe or mutate half-updated market
+// state. Soroban's host rejects cross-contract re-entry at the protocol level
+// (ContractReentryMode::Prohibited), so the nested call traps with "Contract
+// re-entry is not allowed"; the in-contract guard is defense-in-depth in case
+// a reentrant invoke mode is ever introduced.
+
+#[contract]
+struct ReentrantReferral;
+
+#[contractimpl]
+impl ReentrantReferral {
+    pub fn interface_version(_env: Env) -> u32 {
+        1
+    }
+
+    pub fn credit(env: Env, caller: Address, user: Address, _referral_fee: i128) -> bool {
+        // Re-enter the market (the `caller`) while it is mid-place_bet.
+        let market = PredictionMarketContractClient::new(&env, &caller);
+        market.place_bet(&user, &1_u64, &true, &100_0000000_i128);
+        false
+    }
+}
+
+#[test]
+#[should_panic(expected = "Contract re-entry is not allowed")]
+fn test_place_bet_rejects_reentrancy() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    let reentrant = t.env.register(ReentrantReferral, ());
+    let cfg = t.client.get_config();
+    t.client.set_config(
+        &t.admin,
+        &cfg.token,
+        &reentrant,
+        &cfg.leaderboard,
+        &cfg.xlm_sac,
+    );
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+}
