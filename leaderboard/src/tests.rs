@@ -299,14 +299,14 @@ fn test_equal_min_newcomer_displaces_min_when_full() {
         if i == 0 {
             min_player = Some(user.clone());
         }
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     let min_player = min_player.unwrap();
     assert_eq!(client.get_player_count(), 50);
     assert_eq!(client.get_points(&min_player), 100);
 
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &100_u64, &true);
+    client.reward(&market, &newcomer, &100_u64, &0_i128, &true);
 
     // Still capped at 50; the incumbent min (100) is evicted, the newcomer
     // enters, and the list now holds the newcomer instead of the old min.
@@ -322,7 +322,7 @@ fn test_equal_min_fifo_evicts_oldest_tie() {
     let (env, client, _admin, market, _referral) = setup();
     for i in 0u64..45 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(100 + i), &true);
+        client.reward(&market, &user, &(100 + i), &0_i128, &true);
     }
     let mut first_tie: Option<Address> = None;
     let mut last_tie: Option<Address> = None;
@@ -334,7 +334,7 @@ fn test_equal_min_fifo_evicts_oldest_tie() {
         if i == 4 {
             last_tie = Some(user.clone());
         }
-        client.add_pts(&market, &user, &10_u64, &true);
+        client.reward(&market, &user, &10_u64, &0_i128, &true);
     }
     let first_tie = first_tie.unwrap();
     let last_tie = last_tie.unwrap();
@@ -344,7 +344,7 @@ fn test_equal_min_fifo_evicts_oldest_tie() {
     assert_eq!(client.get_rank(&last_tie), 46);
 
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &10_u64, &true);
+    client.reward(&market, &newcomer, &10_u64, &0_i128, &true);
 
     assert_eq!(client.get_player_count(), 50);
     // FIFO: the oldest tied-at-min player is displaced; the newer tie stays.
@@ -360,23 +360,23 @@ fn test_fill_min_boost_keeps_cache_correct() {
     // (lower) minimum and wrongly displaces a stronger player.
     let (env, client, _admin, market, _referral) = setup();
     let weakest = Address::generate(&env);
-    client.add_pts(&market, &weakest, &100_u64, &true);
+    client.reward(&market, &weakest, &100_u64, &0_i128, &true);
     // Boost the (cached) min player before the list fills up.
-    client.add_pts(&market, &weakest, &50_u64, &true);
+    client.reward(&market, &weakest, &50_u64, &0_i128, &true);
     assert_eq!(client.get_points(&weakest), 150);
 
     for i in 0u64..48 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(200 + i), &true);
+        client.reward(&market, &user, &(200 + i), &0_i128, &true);
     }
     let last = Address::generate(&env);
-    client.add_pts(&market, &last, &250_u64, &true);
+    client.reward(&market, &last, &250_u64, &0_i128, &true);
     assert_eq!(client.get_player_count(), 50);
 
     // 120 is below the TRUE min (150) — must be rejected, and the boosted
     // player must remain in the list.
     let newcomer = Address::generate(&env);
-    client.add_pts(&market, &newcomer, &120_u64, &true);
+    client.reward(&market, &newcomer, &120_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&newcomer), 0);
     assert_eq!(client.get_rank(&weakest), 50);
 }
@@ -393,13 +393,13 @@ fn test_fifo_evicts_consecutive_oldest_ties_across_slot_reuse() {
     // 48 strictly-higher scorers so the last two slots hold the tied minimum.
     for i in 0u64..48 {
         let user = Address::generate(&env);
-        client.add_pts(&market, &user, &(1000 + i), &true);
+        client.reward(&market, &user, &(1000 + i), &0_i128, &true);
     }
     // A is the older tied-at-min player (lower slot), B the newer one.
     let a = Address::generate(&env);
     let b = Address::generate(&env);
-    client.add_pts(&market, &a, &100_u64, &true);
-    client.add_pts(&market, &b, &100_u64, &true);
+    client.reward(&market, &a, &100_u64, &0_i128, &true);
+    client.reward(&market, &b, &100_u64, &0_i128, &true);
     assert_eq!(client.get_player_count(), 50);
     assert_eq!(client.get_rank(&a), 49);
     assert_eq!(client.get_rank(&b), 49);
@@ -407,7 +407,7 @@ fn test_fifo_evicts_consecutive_oldest_ties_across_slot_reuse() {
     // C ties the min → evicts the oldest tie (A), even though A held the
     // lowest min slot.
     let c = Address::generate(&env);
-    client.add_pts(&market, &c, &100_u64, &true);
+    client.reward(&market, &c, &100_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&a), 0);
     assert_eq!(client.get_rank(&b), 49);
     assert_eq!(client.get_rank(&c), 49);
@@ -415,7 +415,7 @@ fn test_fifo_evicts_consecutive_oldest_ties_across_slot_reuse() {
     // D ties the min → B is now the oldest surviving tie (C reused A's slot).
     // D must evict B, NOT C. This is the FIFO-vs-lowest-slot discriminator.
     let d = Address::generate(&env);
-    client.add_pts(&market, &d, &100_u64, &true);
+    client.reward(&market, &d, &100_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&a), 0);
     assert_eq!(client.get_rank(&b), 0);
     assert_eq!(client.get_rank(&c), 49);
@@ -423,7 +423,7 @@ fn test_fifo_evicts_consecutive_oldest_ties_across_slot_reuse() {
 
     // E ties the min → C is now the oldest survivor (D reused B's slot).
     let e = Address::generate(&env);
-    client.add_pts(&market, &e, &100_u64, &true);
+    client.reward(&market, &e, &100_u64, &0_i128, &true);
     assert_eq!(client.get_rank(&c), 0);
     assert_eq!(client.get_rank(&d), 49);
     assert_eq!(client.get_rank(&e), 49);
