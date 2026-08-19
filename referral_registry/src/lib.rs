@@ -40,6 +40,10 @@ pub enum ReferralError {
     /// order/count/type, changed return type) always increments
     /// INTERFACE_VERSION in the same commit. See EXPECTED_LEADERBOARD_INTERFACE_VERSION.
     IncompatibleInterface = 9,
+    /// A state-mutating function was re-entered while a prior invocation was
+    /// still mid-flight (issue #72). Reentrant calls are rejected before any
+    /// external call can observe or mutate partially-updated state.
+    ReentrancyDetected = 10,
 }
 
 #[contracttype]
@@ -64,6 +68,11 @@ pub enum DataKey {
     LeaderboardContract,
     XlmSacContract,
     Paused,
+    // ── Reentrancy guard (issue #72) ──────────────────────────────────────
+    // Instance-storage bool set while a guarded function is running and
+    // cleared on success. A reentrant call sees `true` and is rejected; an
+    // aborted call's write is rolled back with the rest of the transaction.
+    ReentrancyGuard,
 }
 
 // Lever A: packed registrant profile — one storage slot instead of three.
@@ -168,6 +177,7 @@ impl ReferralRegistryContract {
     ) -> Result<(), ReferralError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+        Self::enter_reentrancy_guard(&env)?;
         if Self::is_registered(env.clone(), user.clone()) {
             return Err(ReferralError::AlreadyRegistered);
         }
@@ -219,6 +229,7 @@ impl ReferralRegistryContract {
                 WELCOME_BONUS_TOKENS.into_val(&env),
             ],
         );
+        Self::exit_reentrancy_guard(&env);
         Ok(())
     }
 
@@ -231,10 +242,23 @@ impl ReferralRegistryContract {
         Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_market_contract(&env, &caller)?;
+        Self::enter_reentrancy_guard(&env)?;
         // Lever A: resolve referrer via packed Profile (new) or legacy key (old).
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
-        match referrer {
+        let result = match referrer {
             Some(ref_addr) => {
+                // Effects before interaction (issue #72): record the referrer's
+                // earnings BEFORE the external transfer / leaderboard call.
+                let earnings: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ReferralEarnings(ref_addr.clone()))
+                    .unwrap_or(0);
+                env.storage().persistent().set(
+                    &DataKey::ReferralEarnings(ref_addr.clone()),
+                    &(earnings + referral_fee),
+                );
+
                 let xlm_sac: Address = env
                     .storage()
                     .instance()
@@ -261,16 +285,7 @@ impl ReferralRegistryContract {
                         REFERRAL_BET_POINTS.into_val(&env),
                     ],
                 );
-                let earnings: i128 = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::ReferralEarnings(ref_addr.clone()))
-                    .unwrap_or(0);
-                env.storage().persistent().set(
-                    &DataKey::ReferralEarnings(ref_addr),
-                    &(earnings + referral_fee),
-                );
-                Ok(true)
+                true
             }
             None => {
                 if referral_fee > 0 {
@@ -285,9 +300,12 @@ impl ReferralRegistryContract {
                         &referral_fee,
                     );
                 }
-                Ok(false)
+                false
             }
-        }
+        };
+
+        Self::exit_reentrancy_guard(&env);
+        Ok(result)
     }
 
     fn load_profile(env: &Env, user: &Address) -> Option<UserProfile> {
@@ -401,6 +419,32 @@ impl ReferralRegistryContract {
             return Err(ReferralError::ContractPaused);
         }
         Ok(())
+    }
+
+    // Issue #72: a single-bool reentrancy guard. Set before a state-mutating
+    // function performs an external call, cleared on the success path. A
+    // reentrant call that re-enters while the guard is held fails with
+    // ReentrancyDetected, which reverts the whole transaction (Soroban is
+    // atomic), so no partial state can be observed. The guard lives in
+    // instance storage; if the outer call reverts, the rollback clears it
+    // automatically, so it can never stay "locked".
+    #[inline]
+    fn enter_reentrancy_guard(env: &Env) -> Result<(), ReferralError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::ReentrancyGuard)
+            .unwrap_or(false)
+        {
+            return Err(ReferralError::ReentrancyDetected);
+        }
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        Ok(())
+    }
+
+    #[inline]
+    fn exit_reentrancy_guard(env: &Env) {
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &false);
     }
 }
 
