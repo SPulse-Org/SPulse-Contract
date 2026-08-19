@@ -154,7 +154,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
-              "function_name": "set_token",
+              "function_name": "set_token_contract",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
@@ -452,6 +452,8 @@
       ]
     ],
     [],
+    [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
@@ -474,6 +476,8 @@
         }
       ]
     ],
+    [],
+    [],
     []
   ],
   "ledger": {
@@ -1232,7 +1236,7 @@
                       "symbol": "net"
                     },
                     "val": {
-                      "i128": "980000000"
+                      "i128": "0"
                     }
                   }
                 ]
@@ -1303,7 +1307,7 @@
                       "symbol": "net"
                     },
                     "val": {
-                      "i128": "490000000"
+                      "i128": "0"
                     }
                   }
                 ]

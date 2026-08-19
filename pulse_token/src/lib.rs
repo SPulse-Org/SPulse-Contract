@@ -4,13 +4,10 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String,
 };
 
-// ── Interface versioning (upgrade coordination) ──────────────────────────────
-// INTERFACE_VERSION identifies the ABI this contract exposes to its callers
-// (the leaderboard invokes mint). It MUST be bumped in the source AND
-// committed to storage via set_interface_version() on every incompatible ABI
-// change, so callers can fail closed instead of executing against a mismatched
-// ABI. Non-zero means the contract declares a version; 0 means uncoordinated.
-const INTERFACE_VERSION: u32 = 1;
+// Issue #84: bump whenever a function signature, argument order, or return
+// type that a caller relies on changes, so a caller pinning this version can
+// detect an incompatible upgrade before invoking.
+pub const INTERFACE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -24,6 +21,7 @@ pub enum TokenError {
     NotAdmin = 6,
     InsufficientAllowance = 7,
     InvalidExpirationLedger = 8,
+    ContractPaused = 9,
 }
 
 #[contracttype]
@@ -37,6 +35,7 @@ pub enum DataKey {
     Symbol,
     Decimals,
     Allowance(Address, Address),
+    Paused,
 }
 
 #[contracttype]
@@ -93,6 +92,42 @@ impl PULSETokenContract {
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
+    }
+
+    /// The cross-contract ABI version this deployment implements (issue #84).
+    pub fn interface_version(_env: Env) -> u32 {
+        INTERFACE_VERSION
+    }
+
+    /// Halt mint/transfer/burn in an emergency. Admin only. View functions
+    /// (balance, total_supply, ...) keep working so integrators can still
+    /// read state while the contract is paused.
+    pub fn pause(env: Env, admin: Address) -> Result<(), TokenError> {
+        let stored = Self::require_admin(&env)?;
+        if admin != stored {
+            return Err(TokenError::NotAdmin);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Resume mint/transfer/burn. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), TokenError> {
+        let stored = Self::require_admin(&env)?;
+        if admin != stored {
+            return Err(TokenError::NotAdmin);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn set_minter(env: Env, minter: Address) -> Result<(), TokenError> {
@@ -208,6 +243,7 @@ impl PULSETokenContract {
     /// balance/total_supply are written only if the cap is not exceeded. A
     /// failed mint never partially updates balances or supply.
     pub fn mint(env: Env, minter: Address, to: Address, amount: i128) -> Result<(), TokenError> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
         }
@@ -250,6 +286,7 @@ impl PULSETokenContract {
     }
 
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
         }
@@ -372,6 +409,7 @@ impl PULSETokenContract {
     }
 
     pub fn burn(env: Env, from: Address, amount: i128) -> Result<(), TokenError> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
         }
@@ -434,6 +472,13 @@ impl PULSETokenContract {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(TokenError::NotInitialized)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), TokenError> {
+        if Self::is_paused(env.clone()) {
+            return Err(TokenError::ContractPaused);
+        }
+        Ok(())
     }
 }
 
