@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val,
+    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Error,
+    IntoVal, String, Symbol, Val,
 };
 
 const WELCOME_BONUS_POINTS: u64 = 5;
@@ -104,6 +104,9 @@ impl ReferralRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::XlmSacContract, &xlm_sac);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
     }
 
@@ -179,6 +182,17 @@ impl ReferralRegistryContract {
                 return Err(ReferralError::ReferrerNotRegistered);
             }
         }
+        // Upgrade coordination: verify the leaderboard exposes a compatible
+        // `reward_bonus` interface BEFORE writing the profile or any state,
+        // so a unilateral incompatible upgrade fails the whole call atomically
+        // instead of registering the user and only then failing the bonus.
+        let leaderboard: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LeaderboardContract)
+            .unwrap();
+        Self::require_interface_version(&env, &leaderboard, LEADERBOARD_BONUS_INTERFACE_VERSION)?;
+
         // Lever A: write ONE packed Profile entry (display_name + referrer)
         // instead of the three legacy keys (Registered + DisplayName + Referrer).
         // Existence of Profile(user) is what is_registered() now checks.
@@ -235,6 +249,21 @@ impl ReferralRegistryContract {
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
         match referrer {
             Some(ref_addr) => {
+                let leaderboard: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::LeaderboardContract)
+                    .unwrap();
+                // Upgrade coordination: verify the leaderboard exposes a
+                // compatible `add_bonus_pts` interface BEFORE transferring the
+                // fee or writing any state, so a unilateral incompatible
+                // upgrade fails the whole call atomically instead of paying the
+                // referrer and only then discovering the ABI mismatch.
+                Self::require_interface_version(
+                    &env,
+                    &leaderboard,
+                    LEADERBOARD_BONUS_INTERFACE_VERSION,
+                )?;
                 let xlm_sac: Address = env
                     .storage()
                     .instance()
@@ -362,6 +391,32 @@ impl ReferralRegistryContract {
             .ok_or(ReferralError::NotInitialized)?;
         if *caller != market {
             return Err(ReferralError::UnauthorizedCaller);
+        }
+        Ok(())
+    }
+
+    // ── Interface versioning helpers (upgrade coordination) ──────────────
+    // Reads `interface_version()` on the target contract and fails closed with
+    // a typed error when the target does not expose the function
+    // (InterfaceVersionMissing) or reports a version below the required
+    // minimum (IncompatibleInterface). Uses try_invoke_contract so a missing
+    // function or panicking target is caught deterministically instead of
+    // aborting with a generic host panic.
+    fn require_interface_version(
+        env: &Env,
+        target: &Address,
+        required: u32,
+    ) -> Result<(), ReferralError> {
+        let version: u32 = match env.try_invoke_contract::<u32, Error>(
+            target,
+            &Symbol::new(env, "interface_version"),
+            vec![&env],
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) | Err(_) => return Err(ReferralError::InterfaceVersionMissing),
+        };
+        if version < required {
+            return Err(ReferralError::IncompatibleInterface);
         }
         Ok(())
     }

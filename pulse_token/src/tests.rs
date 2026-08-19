@@ -12,14 +12,23 @@ fn setup(env: &Env) -> PULSETokenContractClient<'_> {
     PULSETokenContractClient::new(env, &id)
 }
 
-/// Initialize with standard PULSE metadata and return the admin address.
+/// Generous cap so existing monetary tests never trip it.
+const TEST_CAP: i128 = 1_000_000_000_000_000_000;
+
+/// Initialize with standard PULSE metadata and a large default cap; returns the admin.
 fn init(env: &Env, client: &PULSETokenContractClient<'_>) -> Address {
+    init_with_cap(env, client, TEST_CAP)
+}
+
+/// Initialize with standard PULSE metadata and an explicit max supply cap.
+fn init_with_cap(env: &Env, client: &PULSETokenContractClient<'_>, cap: i128) -> Address {
     let admin = Address::generate(env);
     client.initialize(
         &admin,
         &String::from_str(env, "PULSE"),
         &String::from_str(env, "PLSE"),
         &7,
+        &cap,
     );
     admin
 }
@@ -39,6 +48,7 @@ fn test_initialize_with_metadata() {
     assert_eq!(client.symbol(), String::from_str(&env, "PLSE"));
     assert_eq!(client.decimals(), 7);
     assert_eq!(client.total_supply(), 0_i128);
+    assert_eq!(client.max_supply(), TEST_CAP);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

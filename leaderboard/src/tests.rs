@@ -1,5 +1,17 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Env};
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::Address as _,
+    {Env, String},
+};
+
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
 
 fn setup() -> (
     Env,

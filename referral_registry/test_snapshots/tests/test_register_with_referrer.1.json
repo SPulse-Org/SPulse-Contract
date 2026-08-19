@@ -26,6 +26,9 @@
                 },
                 {
                   "u32": 7
+                },
+                {
+                  "i128": "1000000000000000"
                 }
               ]
             }
@@ -547,6 +550,30 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "MaxSupply"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "i128": "1000000000000000"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "Name"
                           }
                         ]
@@ -629,7 +656,7 @@
                       "symbol": "total_bets"
                     },
                     "val": {
-                      "u32": 1
+                      "u32": 0
                     }
                   },
                   {
@@ -673,15 +700,15 @@
                       "symbol": "lost_bets"
                     },
                     "val": {
-                      "u32": 0
+                      "u64": "5"
                     }
                   },
                   {
                     "key": {
-                      "symbol": "points"
+                      "symbol": "total_bets"
                     },
                     "val": {
-                      "u64": "5"
+                      "u32": 1
                     }
                   },
                   {
@@ -848,7 +875,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6307200
+        "live_until": 4095
       },
       {
         "entry": {
@@ -875,6 +902,18 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {
@@ -1096,6 +1135,18 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {

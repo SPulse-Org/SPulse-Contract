@@ -10,6 +10,16 @@ use soroban_sdk::{
 use leaderboard::LeaderboardContract;
 use pulse_token::PULSETokenContract;
 
+// Dummy contract with no interface_version getter — simulates a contract
+// deployed before the versioning scheme existed.
+#[contract]
+struct NoVersionContract;
+
+#[contractimpl]
+impl NoVersionContract {
+    pub fn initialize(_env: Env) {}
+}
+
 // ── Test Helpers ──────────────────────────────────────────────────────────────
 
 struct TestSetup {
@@ -39,6 +49,7 @@ fn setup() -> TestSetup {
         &String::from_str(&env, "PULSE"),
         &String::from_str(&env, "PLSE"),
         &7u32,
+        &1_000_000_000_000_000_i128,
     );
 
     // Deploy Leaderboard

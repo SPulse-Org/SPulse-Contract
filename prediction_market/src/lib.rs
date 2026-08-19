@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Error,
+    IntoVal, String, Symbol, Val, Vec,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -24,6 +24,18 @@ const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
 const WIN_TOKENS: i128 = 10_0000000;
 const LOSE_TOKENS: i128 = 2_0000000;
+
+// ── Interface versioning (upgrade coordination) ──────────────────────────────
+// INTERFACE_VERSION identifies the ABI this contract exposes to the other
+// contracts it interoperates with. It MUST be bumped in the source AND
+// committed to storage via set_interface_version() whenever any function
+// another contract calls changes incompatibly, so downstream callers can
+// fail closed instead of executing against a mismatched ABI.
+const INTERFACE_VERSION: u32 = 1;
+// Minimum interface versions required from each dependency before this
+// contract will invoke a cross-contract function (fail closed otherwise).
+const REFERRAL_CREDIT_INTERFACE_VERSION: u32 = 1;
+const LEADERBOARD_REWARD_INTERFACE_VERSION: u32 = 1;
 
 // Withdrawal safety (issue #12): a single payout is capped and the non-admin
 // path is timelocked, so a compromised fee recipient cannot drain the whole
@@ -219,6 +231,9 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
     }
 
@@ -623,14 +638,17 @@ impl PredictionMarketContract {
 
             for i in 0..bettors {
                 let slot_key = DataKey::BettorAt(market_id, i);
-                let bettor: Address =
-                    if let Some(a) = env.storage().persistent().get(&slot_key) {
-                        a
-                    } else {
-                        continue;
-                    };
+                let bettor: Address = if let Some(a) = env.storage().persistent().get(&slot_key) {
+                    a
+                } else {
+                    continue;
+                };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
-                if let Some(entry) = env.storage().persistent().get::<DataKey, BetEntry>(&bet_key) {
+                if let Some(entry) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, BetEntry>(&bet_key)
+                {
                     if entry.is_yes == outcome {
                         let payout = (entry.net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
@@ -777,12 +795,23 @@ impl PredictionMarketContract {
         }
 
         let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
         let winning_side = if market.outcome {
             market.total_yes
         } else {
             market.total_no
         };
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        // Upgrade coordination: verify the leaderboard exposes a compatible
+        // `reward` interface BEFORE any local state changes or external calls,
+        // so a unilateral incompatible upgrade fails the whole claim atomically
+        // instead of marking the bet claimed and then failing mid-way.
+        Self::require_interface_version(
+            &env,
+            &cfg.leaderboard,
+            LEADERBOARD_REWARD_INTERFACE_VERSION,
+        )?;
+        let this = env.current_contract_address();
 
         // SECURITY: mark claimed BEFORE any external calls.
         entry.claimed = true;
@@ -797,21 +826,14 @@ impl PredictionMarketContract {
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
 
-        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
-        let this = env.current_contract_address();
-
         // XLM payout straight from the settlement-time payout ledger.
         // Winners are exactly the bettors who own a Payout entry; everyone
         // else (losers, empty winning side) has no payout key at all.
-        let payout: i128 = if let Some(p) = env
+        let payout: i128 = env
             .storage()
             .persistent()
             .get::<DataKey, i128>(&DataKey::Payout(market_id, user.clone()))
-        {
-            p
-        } else {
-            0
-        };
+            .unwrap_or_default();
         if is_winner && payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
@@ -1235,9 +1257,9 @@ impl PredictionMarketContract {
             .unwrap_or((now, 0));
 
         // A timestamp regression must remain in the existing window. Using
-        // checked subtraction prevents underflow from resetting the limit and
-        // allowing an extra burst of market creations.
-        let elapsed = now.checked_sub(ws).unwrap_or(0);
+        // saturating subtraction prevents underflow from resetting the limit
+        // and allowing an extra burst of market creations.
+        let elapsed = now.saturating_sub(ws);
         let (new_ws, new_cnt) = if elapsed < 3600 {
             if cnt >= MAX_MARKETS_PER_HOUR {
                 return Err(MarketError::RateLimitExceeded);
