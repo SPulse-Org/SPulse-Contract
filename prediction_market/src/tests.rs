@@ -1,5 +1,6 @@
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{storage::Persistent as _, Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Env, String,
@@ -164,6 +165,49 @@ fn test_create_market() {
     assert_eq!(market.bet_count, 0);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_reject_zero_market_duration() {
+    let t = setup();
+    t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Zero duration"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Other,
+        &0_u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_reject_market_duration_below_minimum() {
+    let t = setup();
+    t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Too short"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Other,
+        &(MIN_MARKET_DURATION_SECS - 1),
+    );
+}
+
+#[test]
+fn test_market_duration_minimum_is_allowed() {
+    let t = setup();
+    let id = t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Minimum duration"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Other,
+        &MIN_MARKET_DURATION_SECS,
+    );
+
+    assert_eq!(
+        t.client.get_market(&id).end_time,
+        t.env.ledger().timestamp() + MIN_MARKET_DURATION_SECS
+    );
+}
+
 // ── 3. Place YES bet ──────────────────────────────────────────────────────────
 
 #[test]
@@ -228,6 +272,12 @@ fn test_fee_split_with_referrer() {
     let referrer = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
 
+    let no_ref: Option<Address> = None;
+    t.referral_client.register_referral(
+        &referrer,
+        &String::from_str(&t.env, "Referrer"),
+        &no_ref,
+    );
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Bettor"),
@@ -238,7 +288,7 @@ fn test_fee_split_with_referrer() {
 
     assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
     assert_eq!(t.xlm.balance(&referrer), 5000000);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 3);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 8);
 }
 
 // ── 7. Reject bet on expired market ──────────────────────────────────────────
@@ -447,10 +497,14 @@ fn test_cancel_market_claim_style_refund() {
     let alice_refund = t.client.cancel_refund(&alice, &id);
     assert_eq!(alice_refund, 100_0000000); // full gross (100 XLM)
     assert_eq!(t.xlm.balance(&alice), alice_before);
+    assert_eq!(t.client.get_bet(&id, &alice).amount, 0);
+    assert_eq!(t.client.get_bet_gross(&id, &alice), 0);
 
     let bob_refund = t.client.cancel_refund(&bob, &id);
     assert_eq!(bob_refund, 50_0000000); // full gross (50 XLM)
     assert_eq!(t.xlm.balance(&bob), bob_before);
+    assert_eq!(t.client.get_bet(&id, &bob).amount, 0);
+    assert_eq!(t.client.get_bet_gross(&id, &bob), 0);
 }
 
 // ── 18. Cancel refund is idempotent — double refund rejected ──────────────────
@@ -835,6 +889,10 @@ fn test_bettor_index_enumeration() {
 #[test]
 fn test_bettor_index_legacy_read_is_bounded() {
     let t = setup();
+    // Simulating a 101-entry legacy index legitimately reads 100 slots in one
+    // call, which exceeds the default mainnet-like resource limits — this test
+    // proves read boundedness, not gas, so lift the limits like other suites.
+    t.env.cost_estimate().disable_resource_limits();
     let id = create_test_market(&t);
     let first = Address::generate(&t.env);
     let beyond_first_page = Address::generate(&t.env);
@@ -876,6 +934,12 @@ fn test_referrer_bonus_points_per_bet() {
     let referrer = Address::generate(&t.env);
     fund_user(&t, &user, 500_0000000);
 
+    let no_ref: Option<Address> = None;
+    t.referral_client.register_referral(
+        &referrer,
+        &String::from_str(&t.env, "Referrer"),
+        &no_ref,
+    );
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Fan"),
@@ -885,7 +949,7 @@ fn test_referrer_bonus_points_per_bet() {
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
 
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 6);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 11);
 }
 
 // ── 31. Spam guard: TooManyBets ──────────────────────────────────────────────
@@ -898,8 +962,10 @@ fn test_reject_too_many_bets() {
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 100_000_000_000);
 
+    // 1.1 XLM gross clears the net minimum (net = 1.078 XLM >= MIN_BET) so the
+    // 21st bet actually trips the TooManyBets guard instead of BetTooSmall.
     for _ in 0..=20u32 {
-        t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+        t.client.place_bet(&user, &id, &true, &11_0000000_i128);
     }
 }
 
@@ -1190,6 +1256,12 @@ fn test_e2e_full_inter_contract_flow() {
     fund_user(&t, &alice, 1000_0000000);
     fund_user(&t, &bob, 1000_0000000);
 
+    let no_ref: Option<Address> = None;
+    t.referral_client.register_referral(
+        &referrer,
+        &String::from_str(&t.env, "Referrer"),
+        &no_ref,
+    );
     t.referral_client.register_referral(
         &alice,
         &String::from_str(&t.env, "Alice"),
@@ -1212,7 +1284,7 @@ fn test_e2e_full_inter_contract_flow() {
         .place_bet(&alice, &market_id, &true, &100_0000000_i128);
     assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
     assert_eq!(t.xlm.balance(&referrer), 5000000);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 3);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 8);
     // Alice's welcome bonus counts as activity: won(0) + lost(0) + bonus(1).
     assert_eq!(t.leaderboard_client.get_stats(&alice).total_bets, 1);
     assert_eq!(t.client.get_market(&market_id).total_yes, 98_0000000);
@@ -1234,7 +1306,7 @@ fn test_e2e_full_inter_contract_flow() {
     assert_eq!(t.client.get_bet_gross(&market_id, &alice), 150_0000000);
     assert_eq!(t.client.get_market(&market_id).total_yes, 147_0000000);
     assert_eq!(t.client.get_market(&market_id).bet_count, 2);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 6);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 11);
 
     // Add a resolver and resolve via them
     let resolver = Address::generate(&t.env);
@@ -1564,4 +1636,298 @@ fn test_no_switch_payout_and_refund_math_is_unchanged() {
         100_0000000
     );
     assert_eq!(t.xlm.balance(&winner), before_refund);
+// ── Cross-contract interface versioning (issue #84) ───────────────────────────
+
+// Stands in for a referral_registry/leaderboard deployment upgraded to an
+// incompatible ABI: it only implements interface_version(), reporting a
+// version this prediction_market build does not expect.
+#[contract]
+struct MockIncompatibleDependency;
+
+#[contractimpl]
+impl MockIncompatibleDependency {
+    pub fn interface_version(_env: Env) -> u32 {
+        99
+    }
+}
+
+#[test]
+fn test_interface_version_reported() {
+    let t = setup();
+    assert_eq!(t.client.interface_version(), 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_place_bet_rejects_incompatible_referral() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    let fake_referral = t.env.register(MockIncompatibleDependency, ());
+    let cfg = t.client.get_config();
+    t.client.set_config(
+        &t.admin,
+        &cfg.token,
+        &fake_referral,
+        &cfg.leaderboard,
+        &cfg.xlm_sac,
+    );
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_claim_rejects_incompatible_leaderboard() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    let fake_leaderboard = t.env.register(MockIncompatibleDependency, ());
+    let cfg = t.client.get_config();
+    t.client.set_config(
+        &t.admin,
+        &cfg.token,
+        &cfg.referral,
+        &fake_leaderboard,
+        &cfg.xlm_sac,
+    );
+
+    t.client.claim(&user, &id);
+}
+
+// Stands in for a leaderboard deployment that reports the version this
+// prediction_market build expects, but is missing the actual reward()
+// function it's about to call. Proves the known limitation of the version
+// check: a matching u32 alone does not prove ABI compatibility, only that
+// the callee's author intended it to be compatible. If a breaking change to
+// reward()'s signature ever ships without bumping INTERFACE_VERSION, this is
+// exactly the failure mode that results, just past the version check instead
+// of at it.
+#[contract]
+struct MockLeaderboardMissingReward;
+
+#[contractimpl]
+impl MockLeaderboardMissingReward {
+    pub fn interface_version(_env: Env) -> u32 {
+        1
+    }
+    // No reward() here on purpose.
+}
+
+#[test]
+#[should_panic]
+fn test_matching_version_does_not_guarantee_claim_succeeds() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    let fake_leaderboard = t.env.register(MockLeaderboardMissingReward, ());
+    let cfg = t.client.get_config();
+    t.client.set_config(
+        &t.admin,
+        &cfg.token,
+        &cfg.referral,
+        &fake_leaderboard,
+        &cfg.xlm_sac,
+    );
+
+    // require_compatible_leaderboard passes (version 1 == version 1), then
+    // claim() panics inside the real reward() invoke_contract call because
+    // the function doesn't exist on the callee.
+    t.client.claim(&user, &id);
+}
+
+// ── Emergency Pause (issue #83) ───────────────────────────────────────────────
+
+#[test]
+fn test_pause_unpause_admin_only() {
+    let t = setup();
+    assert!(!t.client.is_paused());
+
+    t.client.pause(&t.admin);
+    assert!(t.client.is_paused());
+
+    t.client.unpause(&t.admin);
+    assert!(!t.client.is_paused());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_pause_rejects_non_admin() {
+    let t = setup();
+    let not_admin = Address::generate(&t.env);
+    t.client.pause(&not_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_create_market() {
+    let t = setup();
+    t.client.pause(&t.admin);
+    create_test_market(&t);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_place_bet() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+
+    t.client.pause(&t.admin);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_resolve_market() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+
+    t.client.pause(&t.admin);
+    t.client.resolve_market(&t.admin, &id, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_claim() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    t.client.pause(&t.admin);
+    t.client.claim(&user, &id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_withdraw_fees() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    t.client.pause(&t.admin);
+    t.client.withdraw_fees(&t.admin, &t.admin);
+}
+
+// Refunds remain the users' emergency exit even while paused.
+#[test]
+fn test_cancel_refund_still_works_while_paused() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    t.client.cancel_market(&t.admin, &id);
+
+    t.client.pause(&t.admin);
+    let refunded = t.client.cancel_refund(&user, &id);
+    assert_eq!(refunded, 100_0000000);
+}
+
+// View functions must keep working while paused.
+#[test]
+fn test_view_functions_work_while_paused() {
+    let t = setup();
+    let id = create_test_market(&t);
+    t.client.pause(&t.admin);
+
+    assert_eq!(t.client.get_market_count(), 1);
+    let market = t.client.get_market(&id);
+    assert_eq!(market.id, id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_cancel_market() {
+    let t = setup();
+    let id = create_test_market(&t);
+
+    t.client.pause(&t.admin);
+    t.client.cancel_market(&t.admin, &id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_request_withdraw_fees() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    let recipient = Address::generate(&t.env);
+    t.client.add_fee_recipient(&t.admin, &recipient);
+    let fees = t.client.get_accumulated_fees();
+    let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
+
+    t.client.pause(&t.admin);
+    t.client.request_withdraw_fees(&recipient, &recipient, &cap);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_paused_rejects_execute_withdraw_fees() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    let recipient = Address::generate(&t.env);
+    t.client.add_fee_recipient(&t.admin, &recipient);
+    let fees = t.client.get_accumulated_fees();
+    let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
+
+    // Request while unpaused, then let the timelock mature — the pause check
+    // in execute_withdraw_fees must still block payout even on a matured request.
+    t.client.request_withdraw_fees(&recipient, &recipient, &cap);
+    advance_time(&t.env, WITHDRAW_DELAY_SECS);
+
+    t.client.pause(&t.admin);
+    t.client.execute_withdraw_fees(&recipient);
+}
+
+// The admin's ability to kill a compromised/stuck withdrawal request must
+// remain available mid-pause, same as the users' cancel_refund exit path.
+#[test]
+fn test_cancel_withdrawal_request_still_works_while_paused() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    let recipient = Address::generate(&t.env);
+    t.client.add_fee_recipient(&t.admin, &recipient);
+    let fees = t.client.get_accumulated_fees();
+    let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
+    t.client.request_withdraw_fees(&recipient, &recipient, &cap);
+
+    t.client.pause(&t.admin);
+    t.client.cancel_withdrawal_request(&t.admin, &recipient);
+
+    assert!(t.client.get_pending_withdrawal(&recipient).is_none());
 }
