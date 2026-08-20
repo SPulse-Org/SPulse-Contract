@@ -11,7 +11,9 @@ const MIN_BET: i128 = 10_000_000; // minimum net stake: 1 XLM in stroops
 
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
-const MAX_BETTORS_PER_PAGE: u32 = 100;
+// A page also reads the market and count entries, so leave room under
+// Soroban's 100-entry footprint cap for those fixed reads.
+const MAX_BETTORS_PER_PAGE: u32 = 97;
 
 // Fee constants — multiply before divide to avoid precision loss
 const TOTAL_FEE_BPS: i128 = 200;
@@ -394,6 +396,7 @@ impl PredictionMarketContract {
         }
 
         let is_increase = existing.is_some();
+        let prior_current = existing.as_ref().map(|entry| (entry.is_yes, entry.net));
 
         // ── Fee calculation — use precomputed multipliers ─────────────────
         let total_fee = amount * TOTAL_FEE_BPS / BPS_DENOM;
@@ -450,40 +453,24 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::AccumulatedFees, &acc_fees);
 
+        // `net`/`gross`/`claimed` always describe the side in `e.is_yes`.
+        // The opposite fields are retained for the other side (and for safe
+        // cancellation of entries written by earlier versions).
+        let new_entry = match existing {
             Some(mut e) => {
-                // CAPITAL-PRESERVING SIDE-SWITCH LOGIC
                 if e.is_yes != is_yes {
-                    // Switching sides: move position from old side to new side
-                    let (current_net, current_gross, current_claimed) = if is_yes {
-                        (e.net, e.gross, e.claimed)
-                    } else {
-                        (e.opposite_net, e.opposite_gross, e.opposite_claimed)
-                    };
-                    
-                    // Remove from old side
-                    if is_yes {
-                        e.net = 0;
-                        e.gross = 0;
-                        e.claimed = false;
-                    } else {
-                        e.opposite_net = 0;
-                        e.opposite_gross = 0;
-                        e.opposite_claimed = false;
-                    }
-                    
-                    // Add to new side
-                    if is_yes {
-                        e.net += net;
-                        e.gross += amount;
-                        e.claimed = current_claimed;
-                    } else {
-                        e.opposite_net += net;
-                        e.opposite_gross += amount;
-                        e.opposite_claimed = current_claimed;
-                    }
-                    
-                    // Update current side indicator
+                    // Move the complete old position into the new current-side
+                    // bucket, then add this wager. Nothing remains on the side
+                    // being left.
+                    let moved_net = e.net;
+                    let moved_gross = e.gross;
                     e.is_yes = is_yes;
+                    e.net = moved_net + net;
+                    e.gross = moved_gross + amount;
+                    e.claimed = false;
+                    e.opposite_net = 0;
+                    e.opposite_gross = 0;
+                    e.opposite_claimed = false;
                     e.count += 1;
                     e
                 } else {
@@ -495,13 +482,13 @@ impl PredictionMarketContract {
                 }
             }
             None => BetEntry {
-                net: if is_yes { net } else { 0 },
-                gross: if is_yes { amount } else { 0 },
+                net,
+                gross: amount,
                 is_yes,
                 claimed: false,
                 count: 1,
-                opposite_net: if !is_yes { net } else { 0 },
-                opposite_gross: if !is_yes { amount } else { 0 },
+                opposite_net: 0,
+                opposite_gross: 0,
                 opposite_claimed: false,
             },
         };
@@ -529,7 +516,23 @@ impl PredictionMarketContract {
         }
 
         // ── Market totals ─────────────────────────────────────────────────
-        if is_yes {
+        if let Some((old_is_yes, old_net)) = prior_current {
+            if old_is_yes != is_yes {
+                // The existing current position changes pools along with the
+                // entry, then the new wager joins that destination pool.
+                if old_is_yes {
+                    market.total_yes -= old_net;
+                    market.total_no += old_net + net;
+                } else {
+                    market.total_no -= old_net;
+                    market.total_yes += old_net + net;
+                }
+            } else if is_yes {
+                market.total_yes += net;
+            } else {
+                market.total_no += net;
+            }
+        } else if is_yes {
             market.total_yes += net;
         } else {
             market.total_no += net;
@@ -607,14 +610,8 @@ impl PredictionMarketContract {
                     };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
                 if let Some(entry) = env.storage().persistent().get::<DataKey, BetEntry>(&bet_key) {
-                    // Determine which side to include in payout calculation
-                    let (side_net, side_is_yes) = if entry.is_yes {
-                        (entry.net, true)
-                    } else {
-                        (entry.opposite_net, false)
-                    };
-                    if side_is_yes == outcome {
-                        let payout = (side_net * total_pool) / winning_side;
+                    if entry.is_yes == outcome {
+                        let payout = (entry.net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
                         env.storage().persistent().set(&payout_key, &payout);
                         env.storage()
@@ -690,6 +687,11 @@ impl PredictionMarketContract {
     pub fn cancel_refund(env: Env, user: Address, market_id: u64) -> Result<i128, MarketError> {
         user.require_auth();
 
+        let market = Self::load_market(&env, market_id)?;
+        if !market.cancelled {
+            return Err(MarketError::MarketNotCancelled);
+        }
+
         // OPT: read BetEntry (which now contains gross) — was a separate BetGross key
         let bet_key = DataKey::Bet(market_id, user.clone());
         let mut entry: BetEntry = env
@@ -698,12 +700,21 @@ impl PredictionMarketContract {
             .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
 
-        if entry.gross == 0 {
+        let refund = if !entry.claimed { entry.gross } else { 0 }
+            + if !entry.opposite_claimed {
+                entry.opposite_gross
+            } else {
+                0
+            };
+        if refund == 0 {
             return Err(MarketError::NoBetFound);
         }
 
-        let gross = entry.gross;
-        entry.gross = 0; // idempotency guard
+        // Mark both buckets before the token transfer. This supports entries
+        // with an opposite balance while remaining idempotent for normal,
+        // single-current-side entries.
+        entry.claimed = true;
+        entry.opposite_claimed = true;
         env.storage().persistent().set(&bet_key, &entry);
         // Read-time TTL refresh (issue #9): a refund must not be able to observe
         // an expired bet/market record — keep both alive so a user who returns
@@ -719,10 +730,10 @@ impl PredictionMarketContract {
         token::Client::new(&env, &cfg.xlm_sac).transfer(
             &env.current_contract_address(),
             &user,
-            &gross,
+            &refund,
         );
 
-        Ok(gross)
+        Ok(refund)
     }
 
     // ── Claim ─────────────────────────────────────────────────────────────
@@ -746,19 +757,11 @@ impl PredictionMarketContract {
             .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
 
-        // Find the correct side for claiming based on market outcome
-        let (side_net, side_claimed) = if entry.is_yes == market.outcome {
-            (entry.net, entry.claimed)
-        } else {
-            (entry.opposite_net, entry.opposite_claimed)
-        };
-
-        if side_claimed {
+        if entry.claimed {
             return Err(MarketError::AlreadyClaimed);
         }
 
-        let is_winner = true; // We're checking the correct side
-        let total_pool = market.total_yes + market.total_no;
+        let is_winner = entry.is_yes == market.outcome;
         let winning_side = if market.outcome {
             market.total_yes
         } else {
@@ -766,12 +769,7 @@ impl PredictionMarketContract {
         };
 
         // SECURITY: mark claimed BEFORE any external calls.
-        // Mark the correct side as claimed
-        if entry.is_yes == market.outcome {
-            entry.claimed = true;
-        } else {
-            entry.opposite_claimed = true;
-        }
+        entry.claimed = true;
         env.storage().persistent().set(&bet_key, &entry);
         env.storage()
             .persistent()
@@ -804,7 +802,7 @@ impl PredictionMarketContract {
 
         // All participants earn PULSE tokens + leaderboard points regardless.
         // When winning_side == 0, "winners" receive loser-tier rewards (no competition).
-        let real_win = winning_side > 0;
+        let real_win = is_winner && winning_side > 0;
         let (points, tokens): (u64, i128) = if real_win {
             (WIN_POINTS, WIN_TOKENS)
         } else {
@@ -813,14 +811,23 @@ impl PredictionMarketContract {
 
         let _: Val = env.invoke_contract(
             &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
+            &Symbol::new(&env, "add_pts"),
             vec![
                 &env,
                 this.clone().into_val(&env),
                 user.clone().into_val(&env),
                 points.into_val(&env),
-                tokens.into_val(&env),
                 real_win.into_val(&env),
+            ],
+        );
+        let _: Val = env.invoke_contract(
+            &cfg.token,
+            &Symbol::new(&env, "mint"),
+            vec![
+                &env,
+                this.into_val(&env),
+                user.into_val(&env),
+                tokens.into_val(&env),
             ],
         );
 
