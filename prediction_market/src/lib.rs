@@ -31,6 +31,14 @@ const MAX_MARKETS_PER_HOUR: u32 = 10;
 const MIN_MARKET_DURATION_SECS: u64 = 60; // issue #10: no instantly-expired markets
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
+// Issue #55: economic and temporal guardrails for market creation.
+// The creation fee makes spamming markets expensive (not just gas-free).
+const MARKET_CREATION_FEE: i128 = 10_000_000; // 1 XLM in stroops
+// Hard cap on concurrent active (non-resolved, non-cancelled) markets to
+// prevent griefing via the market list even when the hourly rate limit is
+// respected.
+const MAX_ACTIVE_MARKETS: u32 = 50;
+
 // Fee constants — multiply before divide to avoid precision loss
 const TOTAL_FEE_BPS: i128 = 200;
 const PLATFORM_FEE_BPS: i128 = 150;
@@ -115,7 +123,11 @@ pub enum MarketError {
     /// ABI change (renamed function, changed argument order/count/type,
     /// changed return type) always increments INTERFACE_VERSION in the same
     /// commit. See EXPECTED_REFERRAL_INTERFACE_VERSION / EXPECTED_LEADERBOARD_INTERFACE_VERSION.
-    IncompatibleInterface = 28,
+    IncompatibleInterface = 36,
+    /// Issue #55: too many concurrent active (non-resolved, non-cancelled)
+    /// markets. The admin must resolve or cancel markets before creating new
+    /// ones once the cap is reached.
+    ActiveMarketCapReached = 37,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -149,6 +161,8 @@ pub enum DataKey {
     Paused,
     // ── Reentrancy guard (issue #89) ─────────────────────────────────────
     BetLock(u64, Address), // market_id+user -> bool: prevents reentrant place_bet
+    // ── Active market counter (issue #55) ───────────────────────────────
+    ActiveMarketCount,
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -353,15 +367,6 @@ impl PredictionMarketContract {
                 referral: referral_contract,
                 leaderboard: leaderboard_contract,
                 xlm_sac,
-        Self::require_admin(&env, &admin)?;
-        admin.require_auth();
-        env.storage().instance().set(
-            &DataKey::Cfg,
-            &Config {
-                token: token_contract.clone(),
-                referral: referral_contract.clone(),
-                leaderboard: leaderboard_contract.clone(),
-                xlm_sac: xlm_sac.clone(),
             },
             hashes,
             requested_at: env.ledger().timestamp(),
@@ -444,10 +449,6 @@ impl PredictionMarketContract {
         env.events().publish(
             (Symbol::new(&env, "cfg_act"), caller),
             pending.cfg,
-        );
-        env.events().publish(
-            (Symbol::new(&env, "config_changed"), admin),
-            (token_contract, referral_contract, leaderboard_contract, xlm_sac),
         );
         Ok(())
     }
@@ -569,6 +570,8 @@ impl PredictionMarketContract {
             .instance()
             .get(&DataKey::GovernorCount)
             .unwrap_or(0)
+    }
+
     /// The cross-contract ABI version this deployment implements (issue #84).
     pub fn interface_version(_env: Env) -> u32 {
         INTERFACE_VERSION
@@ -682,6 +685,33 @@ impl PredictionMarketContract {
         }
         Self::check_rate(&env)?;
 
+        // Issue #55: enforce maximum concurrent active markets.
+        let active_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveMarketCount)
+            .unwrap_or(0);
+        if active_count >= MAX_ACTIVE_MARKETS {
+            return Err(MarketError::ActiveMarketCapReached);
+        }
+
+        // Issue #55: charge a creation fee to make spamming expensive.
+        let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
+        let xlm = token::Client::new(&env, &cfg.xlm_sac);
+        let this = env.current_contract_address();
+        xlm.transfer(&admin, &this, &MARKET_CREATION_FEE);
+        // The creation fee is added to the accumulated fee pool so it is
+        // not lost — it can be withdrawn by the admin / fee recipients.
+        let mut acc_fees: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0);
+        acc_fees += MARKET_CREATION_FEE;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccumulatedFees, &acc_fees);
+
         // OPT: single instance read for count (was already one read)
         let market_id: u64 = env
             .storage()
@@ -715,6 +745,12 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .set(&DataKey::MarketCount, &market_id);
+
+        // Issue #55: track the number of active (non-resolved, non-cancelled)
+        // markets so the cap can be enforced on the next create_market call.
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveMarketCount, &(active_count + 1));
 
         env.events().publish(
             (Symbol::new(&env, "market_created"), market.creator.clone(), market_id),
@@ -997,6 +1033,17 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+
+        // Issue #55: decrement active market count on resolution.
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveMarketCount)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveMarketCount, &(active.saturating_sub(1)));
+
         env.events().publish(
             (Symbol::new(&env, "market_resolved"), caller, market_id),
             (outcome, total_pool, acc_fees),
@@ -1024,22 +1071,37 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&mkt_key, &market);
         let _ = Self::refresh_market_keys(&env, market_id);
 
-        // Reclaim fees — net * fee_rate / (1 - fee_rate)
+        // Reclaim bet-platform fees only. The old formula
+        // `net * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS)` reconstructed
+        // the total fee (platform + referral) taken from gross, but
+        // AccumulatedFees only stores the platform_fee portion. With the
+        // creation fee (issue #55) in the accumulator, over-subtracting
+        // would incorrectly drain the creation fee.
         let net_pool = market.total_yes + market.total_no;
-        let fees_in_pool = net_pool * TOTAL_FEE_BPS / (BPS_DENOM - TOTAL_FEE_BPS);
+        let bet_platform_fees = net_pool * PLATFORM_FEE_BPS / NET_NUMERATOR;
         let mut acc_fees: i128 = env
             .storage()
             .instance()
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0);
-        acc_fees = if fees_in_pool < acc_fees {
-            acc_fees - fees_in_pool
+        acc_fees = if bet_platform_fees < acc_fees {
+            acc_fees - bet_platform_fees
         } else {
             0
         };
         env.storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &acc_fees);
+
+        // Issue #55: decrement active market count on cancellation.
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveMarketCount)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveMarketCount, &(active.saturating_sub(1)));
 
         env.events().publish(
             (Symbol::new(&env, "market_cancelled"), admin, market_id),
@@ -1386,6 +1448,16 @@ impl PredictionMarketContract {
             .unwrap_or(0)
     }
 
+    /// Issue #55: current number of active (non-resolved, non-cancelled)
+    /// markets. Callers can compare against MAX_ACTIVE_MARKETS (exported as
+    /// a constant) to know whether new creation is possible.
+    pub fn get_active_market_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ActiveMarketCount)
+            .unwrap_or(0)
+    }
+
     /// Return the first bounded page of bettors for compatibility with the
     /// original ABI. Call `get_market_bettors_page` for later pages.
     pub fn get_market_bettors(env: Env, market_id: u64) -> Result<Vec<Address>, MarketError> {
@@ -1438,7 +1510,11 @@ impl PredictionMarketContract {
         if !env.storage().persistent().has(&key) {
             return 0;
         }
-        env.storage().persistent().get_ttl(&key)
+        // NOTE: soroban-sdk does not expose get_ttl outside testutils.
+        // The remaining TTL can be approximated from the market's end_time.
+        // Returning 0 preserves ABI compatibility; off-chain consumers
+        // should derive expiry from market.end_time instead.
+        0
     }
 
     /// Permissionless keeper: anyone may pay to extend this market's
@@ -1618,6 +1694,8 @@ impl PredictionMarketContract {
         }
         env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(bettors)
+    }
+
     // Issue #84: check a dependency's reported ABI version before invoking
     // it, so a unilateral upgrade with an incompatible credit/reward
     // signature fails with a clear error instead of an opaque
