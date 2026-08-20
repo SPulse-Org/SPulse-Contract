@@ -11,6 +11,7 @@ const MIN_BET: i128 = 10_000_000; // minimum net stake: 1 XLM in stroops
 
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
+const MIN_MARKET_DURATION_SECS: u64 = 60; // issue #10: no instantly-expired markets
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
 // Fee constants — multiply before divide to avoid precision loss
@@ -33,6 +34,17 @@ const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated f
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// Issue #84: bump whenever a function signature, argument order, or return
+// type that a caller relies on changes.
+pub const INTERFACE_VERSION: u32 = 1;
+
+// The referral/leaderboard interface_version this contract was built
+// against. A deployed dependency reporting a different version may have a
+// changed credit/reward ABI — refuse the call rather than invoke blind
+// (issue #84).
+const EXPECTED_REFERRAL_INTERFACE_VERSION: u32 = 1;
+const EXPECTED_LEADERBOARD_INTERFACE_VERSION: u32 = 1;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -65,6 +77,17 @@ pub enum MarketError {
     WithdrawalRequestExists = 23,
     NoWithdrawalRequest = 24,
     WithdrawalTooSoon = 25,
+    ContractPaused = 26,
+    InvalidDuration = 27, // issue #10: duration below the minimum
+    /// A dependency (referral_registry or leaderboard) reported an
+    /// interface_version this contract wasn't built against (issue #84).
+    /// Note: a matching version number alone does not prove the callee's
+    /// actual function shape still matches, it only proves the callee's
+    /// author intended it to. The guarantee only holds if every breaking
+    /// ABI change (renamed function, changed argument order/count/type,
+    /// changed return type) always increments INTERFACE_VERSION in the same
+    /// commit. See EXPECTED_REFERRAL_INTERFACE_VERSION / EXPECTED_LEADERBOARD_INTERFACE_VERSION.
+    IncompatibleInterface = 28,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -88,6 +111,8 @@ pub enum DataKey {
     Payout(u64, Address), // i128 — exact payout computed at resolve time
     // ── Timelocked withdrawal requests (issue #12) ───────────────────────
     PendingWithdrawal(Address), // caller -> WithdrawalRequest
+    // ── Emergency circuit-breaker (issue #83) ─────────────────────────────
+    Paused,
 }
 
 // ── Config packed into one instance storage slot ───────────────────────────
@@ -239,6 +264,40 @@ impl PredictionMarketContract {
         env.storage().instance().get(&DataKey::Cfg).unwrap()
     }
 
+    /// The cross-contract ABI version this deployment implements (issue #84).
+    pub fn interface_version(_env: Env) -> u32 {
+        INTERFACE_VERSION
+    }
+
+    // ── Emergency Pause (issue #83) ─────────────────────────────────────────
+    // Halts market creation, betting, resolution, claims, and fee withdrawals
+    // so an in-progress exploit (e.g. a malicious resolver or a reentrancy
+    // attempt) can be contained while a fix is prepared. cancel_refund and
+    // cancel_withdrawal_request stay open even while paused: refunds are the
+    // users' emergency exit from a cancelled market, and cancelling a pending
+    // withdrawal request is itself a safety action the admin needs.
+
+    pub fn pause(env: Env, admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env, admin: Address) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     // ── Resolver Management ───────────────────────────────────────────────
 
     pub fn add_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), MarketError> {
@@ -308,8 +367,12 @@ impl PredictionMarketContract {
         category: Category,
         duration_secs: u64,
     ) -> Result<u64, MarketError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
+        if duration_secs < MIN_MARKET_DURATION_SECS {
+            return Err(MarketError::InvalidDuration);
+        }
         Self::check_rate(&env)?;
 
         // OPT: single instance read for count (was already one read)
@@ -357,6 +420,7 @@ impl PredictionMarketContract {
         is_yes: bool,
         amount: i128,
     ) -> Result<(), MarketError> {
+        Self::require_not_paused(&env)?;
         user.require_auth();
 
         let net = amount * NET_NUMERATOR / BPS_DENOM;
@@ -420,6 +484,7 @@ impl PredictionMarketContract {
         let paid_referrer = if cached == Some(false) {
             false
         } else {
+            Self::require_compatible_referral(&env, &cfg.referral)?;
             xlm.transfer(&this, &cfg.referral, &referral_fee);
             let result: bool = env.invoke_contract(
                 &cfg.referral,
@@ -508,6 +573,7 @@ impl PredictionMarketContract {
         market_id: u64,
         outcome: bool,
     ) -> Result<(), MarketError> {
+        Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_admin_or_resolver(&env, &caller)?;
 
@@ -601,6 +667,7 @@ impl PredictionMarketContract {
     // ── Cancellation ──────────────────────────────────────────────────────
 
     pub fn cancel_market(env: Env, admin: Address, market_id: u64) -> Result<(), MarketError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
 
@@ -660,7 +727,8 @@ impl PredictionMarketContract {
         }
 
         let gross = entry.gross;
-        entry.gross = 0; // idempotency guard
+        entry.gross = 0;
+        entry.net = 0;
         env.storage().persistent().set(&bet_key, &entry);
         // Read-time TTL refresh (issue #9): a refund must not be able to observe
         // an expired bet/market record — keep both alive so a user who returns
@@ -686,6 +754,7 @@ impl PredictionMarketContract {
     // OPT: one Config read replaces 3 separate reads (xlm_sac, leaderboard, token)
 
     pub fn claim(env: Env, user: Address, market_id: u64) -> Result<(), MarketError> {
+        Self::require_not_paused(&env)?;
         user.require_auth();
 
         let market = Self::load_market(&env, market_id)?;
@@ -756,6 +825,7 @@ impl PredictionMarketContract {
             (LOSE_POINTS, LOSE_TOKENS)
         };
 
+        Self::require_compatible_leaderboard(&env, &cfg.leaderboard)?;
         let _: Val = env.invoke_contract(
             &cfg.leaderboard,
             &Symbol::new(&env, "reward"),
@@ -784,6 +854,7 @@ impl PredictionMarketContract {
         caller: Address,
         recipient: Address,
     ) -> Result<i128, MarketError> {
+        Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         Self::require_valid_fee_recipient(&env, &caller, &recipient)?;
@@ -819,6 +890,7 @@ impl PredictionMarketContract {
         recipient: Address,
         amount: i128,
     ) -> Result<(), MarketError> {
+        Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_admin_or_fee_recipient(&env, &caller)?;
         Self::require_valid_fee_recipient(&env, &caller, &recipient)?;
@@ -863,6 +935,7 @@ impl PredictionMarketContract {
     /// Issue #12: pay out a matured withdrawal request. Reverts while the
     /// WITHDRAW_DELAY_SECS timelock is still running.
     pub fn execute_withdraw_fees(env: Env, caller: Address) -> Result<i128, MarketError> {
+        Self::require_not_paused(&env)?;
         caller.require_auth();
         let key = DataKey::PendingWithdrawal(caller.clone());
         let req: WithdrawalRequest = env
@@ -1036,6 +1109,39 @@ impl PredictionMarketContract {
             .persistent()
             .get(&DataKey::Market(market_id))
             .ok_or(MarketError::MarketNotFound)
+    }
+
+    // Issue #84: check a dependency's reported ABI version before invoking
+    // it, so a unilateral upgrade with an incompatible credit/reward
+    // signature fails with a clear error instead of an opaque
+    // invoke_contract failure or silent misbehavior.
+    fn require_compatible_referral(env: &Env, referral: &Address) -> Result<(), MarketError> {
+        let version: u32 =
+            env.invoke_contract(referral, &Symbol::new(env, "interface_version"), vec![env]);
+        if version != EXPECTED_REFERRAL_INTERFACE_VERSION {
+            return Err(MarketError::IncompatibleInterface);
+        }
+        Ok(())
+    }
+
+    fn require_compatible_leaderboard(env: &Env, leaderboard: &Address) -> Result<(), MarketError> {
+        let version: u32 = env.invoke_contract(
+            leaderboard,
+            &Symbol::new(env, "interface_version"),
+            vec![env],
+        );
+        if version != EXPECTED_LEADERBOARD_INTERFACE_VERSION {
+            return Err(MarketError::IncompatibleInterface);
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn require_not_paused(env: &Env) -> Result<(), MarketError> {
+        if Self::is_paused(env.clone()) {
+            return Err(MarketError::ContractPaused);
+        }
+        Ok(())
     }
 
     #[inline]
