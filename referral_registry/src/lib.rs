@@ -210,12 +210,26 @@ impl ReferralRegistryContract {
         Self::require_compatible_leaderboard(&env, &leaderboard)?;
         let _: Val = env.invoke_contract(
             &leaderboard,
-            &Symbol::new(&env, "reward_bonus"),
+            &Symbol::new(&env, "add_bonus_pts"),
             vec![
                 &env,
                 this.into_val(&env),
-                user.into_val(&env),
+                user.clone().into_val(&env),
                 WELCOME_BONUS_POINTS.into_val(&env),
+            ],
+        );
+        let token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenContract)
+            .unwrap();
+        let _: Val = env.invoke_contract(
+            &token,
+            &Symbol::new(&env, "mint"),
+            vec![
+                &env,
+                env.current_contract_address().into_val(&env),
+                user.into_val(&env),
                 WELCOME_BONUS_TOKENS.into_val(&env),
             ],
         );

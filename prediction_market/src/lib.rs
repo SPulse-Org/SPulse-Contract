@@ -11,6 +11,9 @@ const MIN_BET: i128 = 10_000_000; // minimum net stake: 1 XLM in stroops
 
 const MAX_BETS_PER_USER: u32 = 20;
 const MAX_MARKETS_PER_HOUR: u32 = 10;
+// A page also reads the market and count entries, so leave room under
+// Soroban's 100-entry footprint cap for those fixed reads.
+const MAX_BETTORS_PER_PAGE: u32 = 97;
 const MIN_MARKET_DURATION_SECS: u64 = 60; // issue #10: no instantly-expired markets
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
@@ -129,11 +132,15 @@ pub struct Config {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BetEntry {
-    pub net: i128,   // post-fee amount bet (used for payout)
-    pub gross: i128, // pre-fee amount sent (used for cancel_refund)
-    pub is_yes: bool,
-    pub claimed: bool,
-    pub count: u32, // how many times this user has bet on this market
+    pub net: i128,        // post-fee amount bet on current side (used for payout)
+    pub gross: i128,      // pre-fee amount sent on current side (used for cancel_refund)
+    pub is_yes: bool,     // current side: true = YES, false = NO
+    pub claimed: bool,    // claim status for current side
+    pub count: u32,       // how many times this user has bet on this market
+    // ── Opposite-side position for capital-preserving side-switching ───────
+    pub opposite_net: i128,      // net on opposite side (0 = no opposite position)
+    pub opposite_gross: i128,    // gross on opposite side (0 = no opposite position)
+    pub opposite_claimed: bool,  // claim status for opposite side
 }
 
 // ── WithdrawalRequest: capped, recipient-validated, timelocked (issue #12) ──
@@ -449,12 +456,12 @@ impl PredictionMarketContract {
             if e.count >= MAX_BETS_PER_USER {
                 return Err(MarketError::TooManyBets);
             }
-            if e.is_yes != is_yes {
-                return Err(MarketError::OppositeSideBet);
-            }
+            // Opposite-side check removed - allow side switching
+            // But validate that switching is capital-preserving (handled in write logic)
         }
 
         let is_increase = existing.is_some();
+        let prior_current = existing.as_ref().map(|entry| (entry.is_yes, entry.net));
 
         // ── Fee calculation — use precomputed multipliers ─────────────────
         let total_fee = amount * TOTAL_FEE_BPS / BPS_DENOM;
@@ -512,13 +519,33 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::AccumulatedFees, &acc_fees);
 
-        // ── Write BetEntry (net + gross + count in one write) ─────────────
+        // `net`/`gross`/`claimed` always describe the side in `e.is_yes`.
+        // The opposite fields are retained for the other side (and for safe
+        // cancellation of entries written by earlier versions).
         let new_entry = match existing {
             Some(mut e) => {
-                e.net += net;
-                e.gross += amount;
-                e.count += 1;
-                e
+                if e.is_yes != is_yes {
+                    // Move the complete old position into the new current-side
+                    // bucket, then add this wager. Nothing remains on the side
+                    // being left.
+                    let moved_net = e.net;
+                    let moved_gross = e.gross;
+                    e.is_yes = is_yes;
+                    e.net = moved_net + net;
+                    e.gross = moved_gross + amount;
+                    e.claimed = false;
+                    e.opposite_net = 0;
+                    e.opposite_gross = 0;
+                    e.opposite_claimed = false;
+                    e.count += 1;
+                    e
+                } else {
+                    // Same-side bet: increase existing position
+                    e.net += net;
+                    e.gross += amount;
+                    e.count += 1;
+                    e
+                }
             }
             None => BetEntry {
                 net,
@@ -526,6 +553,9 @@ impl PredictionMarketContract {
                 is_yes,
                 claimed: false,
                 count: 1,
+                opposite_net: 0,
+                opposite_gross: 0,
+                opposite_claimed: false,
             },
         };
         env.storage().persistent().set(&bet_key, &new_entry);
@@ -552,7 +582,23 @@ impl PredictionMarketContract {
         }
 
         // ── Market totals ─────────────────────────────────────────────────
-        if is_yes {
+        if let Some((old_is_yes, old_net)) = prior_current {
+            if old_is_yes != is_yes {
+                // The existing current position changes pools along with the
+                // entry, then the new wager joins that destination pool.
+                if old_is_yes {
+                    market.total_yes -= old_net;
+                    market.total_no += old_net + net;
+                } else {
+                    market.total_no -= old_net;
+                    market.total_yes += old_net + net;
+                }
+            } else if is_yes {
+                market.total_yes += net;
+            } else {
+                market.total_no += net;
+            }
+        } else if is_yes {
             market.total_yes += net;
         } else {
             market.total_no += net;
@@ -722,13 +768,21 @@ impl PredictionMarketContract {
             .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
 
-        if entry.gross == 0 {
+        let refund = if !entry.claimed { entry.gross } else { 0 }
+            + if !entry.opposite_claimed {
+                entry.opposite_gross
+            } else {
+                0
+            };
+        if refund == 0 {
             return Err(MarketError::NoBetFound);
         }
 
-        let gross = entry.gross;
-        entry.gross = 0;
-        entry.net = 0;
+        // Mark both buckets before the token transfer. This supports entries
+        // with an opposite balance while remaining idempotent for normal,
+        // single-current-side entries.
+        entry.claimed = true;
+        entry.opposite_claimed = true;
         env.storage().persistent().set(&bet_key, &entry);
         // Read-time TTL refresh (issue #9): a refund must not be able to observe
         // an expired bet/market record — keep both alive so a user who returns
@@ -744,10 +798,10 @@ impl PredictionMarketContract {
         token::Client::new(&env, &cfg.xlm_sac).transfer(
             &env.current_contract_address(),
             &user,
-            &gross,
+            &refund,
         );
 
-        Ok(gross)
+        Ok(refund)
     }
 
     // ── Claim ─────────────────────────────────────────────────────────────
@@ -777,7 +831,6 @@ impl PredictionMarketContract {
         }
 
         let is_winner = entry.is_yes == market.outcome;
-        let total_pool = market.total_yes + market.total_no;
         let winning_side = if market.outcome {
             market.total_yes
         } else {
@@ -812,7 +865,7 @@ impl PredictionMarketContract {
         } else {
             0
         };
-        if is_winner && payout > 0 {
+        if payout > 0 {
             token::Client::new(&env, &cfg.xlm_sac).transfer(&this, &user, &payout);
         }
 
@@ -828,14 +881,23 @@ impl PredictionMarketContract {
         Self::require_compatible_leaderboard(&env, &cfg.leaderboard)?;
         let _: Val = env.invoke_contract(
             &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
+            &Symbol::new(&env, "add_pts"),
             vec![
                 &env,
                 this.clone().into_val(&env),
                 user.clone().into_val(&env),
                 points.into_val(&env),
-                tokens.into_val(&env),
                 real_win.into_val(&env),
+            ],
+        );
+        let _: Val = env.invoke_contract(
+            &cfg.token,
+            &Symbol::new(&env, "mint"),
+            vec![
+                &env,
+                this.into_val(&env),
+                user.into_val(&env),
+                tokens.into_val(&env),
             ],
         );
 
