@@ -431,3 +431,237 @@ fn test_mint_emits_event() {
     let name = Symbol::try_from_val(&env, &topic0).unwrap();
     assert_eq!(name, Symbol::new(&env, "mint"));
 }
+// ═════════════════════════════════════════════════════════════════════════════
+//  Issue #97 — balance keys must not expire out from under their holder
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `Balance` entries live in persistent storage, which the ledger deletes once
+// the entry's TTL runs out. Before this fix `transfer`/`burn` wrote a balance
+// without extending its TTL, so an inactive holder's entry could be evicted
+// while `TotalSupply` kept counting those tokens: the holder's PULSE is gone
+// for good and `total_supply > sum(balances)` forever after.
+//
+// These tests read the *ledger's* TTL for the exact `DataKey::Balance` entry
+// before and after each operation. They cannot pass while an extend_ttl call
+// is missing, which is what makes them regression guards rather than
+// happy-path checks.
+
+use crate::{DataKey, TTL_BUMP};
+use soroban_sdk::testutils::{storage::Instance as _, storage::Persistent as _, LedgerInfo};
+
+/// A ledger whose `max_entry_ttl` is large enough to hold TTL_HIGH, matching
+/// the network parameters the contract is deployed against.
+fn ttl_env() -> Env {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set(LedgerInfo {
+        timestamp: 1_000_000,
+        protocol_version: 26,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
+    env
+}
+
+fn advance_ledgers(env: &Env, n: u32) {
+    let seq = env.ledger().sequence();
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 1,
+        protocol_version: 26,
+        sequence_number: seq + n,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
+}
+
+/// The live TTL the ledger holds for `key`, read from inside the contract.
+fn balance_ttl(env: &Env, contract: &Address, holder: &Address) -> u32 {
+    let key = DataKey::Balance(holder.clone());
+    env.as_contract(contract, || env.storage().persistent().get_ttl(&key))
+}
+
+fn instance_ttl(env: &Env, contract: &Address) -> u32 {
+    env.as_contract(contract, || env.storage().instance().get_ttl())
+}
+
+/// Mint `amount` to `to` and return the authorized minter.
+fn mint_to(client: &PULSETokenContractClient<'_>, env: &Env, to: &Address, amount: i128) -> Address {
+    let minter = Address::generate(env);
+    client.set_minter(&minter);
+    client.mint(&minter, to, &amount);
+    minter
+}
+
+#[test]
+fn test_transfer_extends_ttl_on_both_balance_keys() {
+    let env = ttl_env();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    mint_to(&client, &env, &alice, 10_000_0000000_i128);
+    // Give bob an entry too, so we are measuring an extension and not a
+    // first-time write.
+    mint_to(&client, &env, &bob, 1_0000000_i128);
+
+    // Both holders go quiet for long enough that their entries are deep into
+    // the TTL window (but not yet expired).
+    advance_ledgers(&env, 4_000_000);
+
+    let alice_before = balance_ttl(&env, &client.address, &alice);
+    let bob_before = balance_ttl(&env, &client.address, &bob);
+    assert!(
+        alice_before < TTL_BUMP,
+        "setup invariant broken: alice's TTL ({alice_before}) should have decayed below TTL_BUMP"
+    );
+
+    client.transfer(&alice, &bob, &500_0000000_i128);
+
+    let alice_after = balance_ttl(&env, &client.address, &alice);
+    let bob_after = balance_ttl(&env, &client.address, &bob);
+    assert!(
+        alice_after > alice_before && alice_after >= TTL_BUMP,
+        "transfer did not extend the sender's balance TTL ({alice_before} -> {alice_after})"
+    );
+    assert!(
+        bob_after > bob_before && bob_after >= TTL_BUMP,
+        "transfer did not extend the recipient's balance TTL ({bob_before} -> {bob_after})"
+    );
+}
+
+#[test]
+fn test_burn_extends_ttl_on_remaining_balance() {
+    let env = ttl_env();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let alice = Address::generate(&env);
+    mint_to(&client, &env, &alice, 10_000_0000000_i128);
+    advance_ledgers(&env, 4_000_000);
+
+    let before = balance_ttl(&env, &client.address, &alice);
+    assert!(before < TTL_BUMP, "setup invariant broken: TTL ({before}) should be below TTL_BUMP");
+
+    // A partial burn leaves a live balance behind — that remainder needs its
+    // TTL refreshed just as much as a transfer's does.
+    client.burn(&alice, &1_000_0000000_i128);
+
+    let after = balance_ttl(&env, &client.address, &alice);
+    assert!(
+        after > before && after >= TTL_BUMP,
+        "burn did not extend the remaining balance's TTL ({before} -> {after})"
+    );
+    assert_eq!(client.balance(&alice), 9_000_0000000_i128);
+}
+
+#[test]
+fn test_transfer_from_extends_ttl_on_both_balance_keys() {
+    let env = ttl_env();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let spender = Address::generate(&env);
+    mint_to(&client, &env, &alice, 10_000_0000000_i128);
+    mint_to(&client, &env, &bob, 1_0000000_i128);
+
+    advance_ledgers(&env, 4_000_000);
+    // Approve *after* the fast-forward so the allowance itself is still live.
+    client.approve(&alice, &spender, &1_000_0000000_i128, &(env.ledger().sequence() + 1_000));
+
+    let alice_before = balance_ttl(&env, &client.address, &alice);
+    let bob_before = balance_ttl(&env, &client.address, &bob);
+
+    client.transfer_from(&spender, &alice, &bob, &500_0000000_i128);
+
+    assert!(
+        balance_ttl(&env, &client.address, &alice) > alice_before,
+        "transfer_from did not extend the sender's balance TTL"
+    );
+    assert!(
+        balance_ttl(&env, &client.address, &bob) > bob_before,
+        "transfer_from did not extend the recipient's balance TTL"
+    );
+}
+
+#[test]
+fn test_mint_extends_balance_and_instance_ttl() {
+    let env = ttl_env();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let alice = Address::generate(&env);
+    let minter = mint_to(&client, &env, &alice, 1_0000000_i128);
+    advance_ledgers(&env, 4_000_000);
+
+    let balance_before = balance_ttl(&env, &client.address, &alice);
+    let instance_before = instance_ttl(&env, &client.address);
+
+    client.mint(&minter, &alice, &1_0000000_i128);
+
+    assert!(
+        balance_ttl(&env, &client.address, &alice) > balance_before,
+        "mint did not extend the recipient's balance TTL"
+    );
+    // TotalSupply lives in instance storage — the other half of the
+    // total_supply == sum(balances) invariant must stay alive too.
+    assert!(
+        instance_ttl(&env, &client.address) > instance_before,
+        "mint did not extend the instance TTL that carries TotalSupply"
+    );
+}
+
+// ── The headline: an active holder's tokens survive past the original TTL ────
+
+#[test]
+fn test_balance_survives_beyond_original_ttl_and_supply_stays_consistent() {
+    // The adversarial scenario from the issue: Alice holds PULSE and the
+    // ledger runs far past the TTL her entry was created with. Before the fix
+    // her entry is evicted, her balance reads 0, and total_supply keeps
+    // counting the tokens she can no longer touch. After the fix, every
+    // operation that touches her balance renews it, so the invariant
+    // total_supply == sum(balances) holds the whole way through.
+    let env = ttl_env();
+    let client = setup(&env);
+    let _admin = init(&env, &client);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    mint_to(&client, &env, &alice, 10_000_0000000_i128);
+    mint_to(&client, &env, &bob, 10_000_0000000_i128);
+
+    let original_ttl = balance_ttl(&env, &client.address, &alice);
+
+    // Run the ledger well past the entry's original lifetime, transacting
+    // periodically the way a live holder would.
+    let mut elapsed: u32 = 0;
+    while elapsed < original_ttl * 2 {
+        advance_ledgers(&env, 4_000_000);
+        elapsed += 4_000_000;
+        client.transfer(&alice, &bob, &1_0000000_i128);
+        client.transfer(&bob, &alice, &1_0000000_i128);
+    }
+
+    // Balances intact...
+    assert_eq!(client.balance(&alice), 10_000_0000000_i128);
+    assert_eq!(client.balance(&bob), 10_000_0000000_i128);
+    // ...and the token's core invariant still holds.
+    assert_eq!(
+        client.total_supply(),
+        client.balance(&alice) + client.balance(&bob),
+        "total_supply diverged from the sum of balances"
+    );
+    // Every entry still has a healthy lifetime ahead of it.
+    assert!(balance_ttl(&env, &client.address, &alice) >= TTL_BUMP);
+    assert!(balance_ttl(&env, &client.address, &bob) >= TTL_BUMP);
+    assert!(instance_ttl(&env, &client.address) >= TTL_BUMP);
+}
