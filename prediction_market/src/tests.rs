@@ -1868,3 +1868,69 @@ fn test_resolve_market_emits_event() {
     t.client.resolve_market(&t.admin, &id, &true);
     assert_eq!(last_event_name(&t.env), Symbol::new(&t.env, "market_resolved"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #18 — the live claim path reaches exactly one reward entry point
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The leaderboard-side tests pin the contract's own invariant. These drive it
+// from the outside, through the real market → leaderboard → token call chain
+// that a user's `claim` actually takes, so the guarantee is proven end to end
+// rather than in isolation.
+
+#[test]
+fn test_claim_mints_exactly_once_per_settled_bet() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 200_0000000);
+    fund_user(&t, &bob, 200_0000000);
+
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
+
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    assert_eq!(t.token_client.total_supply(), 0);
+
+    t.client.claim(&alice, &id);
+    t.client.claim(&bob, &id);
+
+    // One settled bet each, one mint each — supply is exactly the sum of the
+    // per-outcome reward schedule, with nothing double-counted.
+    assert_eq!(t.token_client.balance(&alice), WIN_TOKENS);
+    assert_eq!(t.token_client.balance(&bob), LOSE_TOKENS);
+    assert_eq!(t.token_client.total_supply(), WIN_TOKENS + LOSE_TOKENS);
+
+    // ...and points moved once, in step with the tokens.
+    assert_eq!(t.leaderboard_client.get_points(&alice), WIN_POINTS);
+    assert_eq!(t.leaderboard_client.get_points(&bob), LOSE_POINTS);
+    assert_eq!(t.leaderboard_client.get_stats(&alice).total_bets, 1);
+    assert_eq!(t.leaderboard_client.get_stats(&bob).total_bets, 1);
+}
+
+#[test]
+fn test_market_cannot_record_a_bet_through_the_retired_entry_point() {
+    // The market contract is still an authorized caller of the leaderboard,
+    // so this is the exact call a buggy or legacy code path inside claim()
+    // could make. It must record nothing: no points, no supply.
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    let attempt = t.leaderboard_client.try_add_pts(
+        &t.client.address,
+        &user,
+        &WIN_POINTS,
+        &true,
+    );
+    assert_eq!(
+        attempt,
+        Err(Ok(leaderboard::LeaderboardError::DeprecatedEntryPoint)),
+        "the market must not have a second way to record a settled bet"
+    );
+
+    assert_eq!(t.leaderboard_client.get_points(&user), 0);
+    assert_eq!(t.token_client.total_supply(), 0);
+}

@@ -16,3 +16,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Issue #18: the reward-path tests mint through a real PULSE token rather
+# than a stub, so "which entry point mints" is measured against real supply.
+pulse_token = { path = "../pulse_token", features = ["testutils"] }

@@ -38,7 +38,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -50,6 +50,9 @@
                   "u64": "100"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -66,7 +69,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -78,6 +81,9 @@
                   "u64": "50"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -95,7 +101,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -107,6 +113,9 @@
                   "u64": "200"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -123,7 +132,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -135,6 +144,9 @@
                   "u64": "201"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -151,7 +163,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -163,6 +175,9 @@
                   "u64": "202"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -179,7 +194,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -191,6 +206,9 @@
                   "u64": "203"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -207,7 +225,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -219,6 +237,9 @@
                   "u64": "204"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -235,7 +256,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -247,6 +268,9 @@
                   "u64": "205"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -263,7 +287,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -275,6 +299,9 @@
                   "u64": "206"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -291,7 +318,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -303,6 +330,9 @@
                   "u64": "207"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -319,7 +349,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -331,6 +361,9 @@
                   "u64": "208"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -347,7 +380,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -359,6 +392,9 @@
                   "u64": "209"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -375,7 +411,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -387,6 +423,9 @@
                   "u64": "210"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -403,7 +442,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -415,6 +454,9 @@
                   "u64": "211"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -431,7 +473,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -443,6 +485,9 @@
                   "u64": "212"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -459,7 +504,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -471,6 +516,9 @@
                   "u64": "213"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -487,7 +535,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -499,6 +547,9 @@
                   "u64": "214"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -515,7 +566,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -527,6 +578,9 @@
                   "u64": "215"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -543,7 +597,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -555,6 +609,9 @@
                   "u64": "216"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -571,7 +628,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -583,6 +640,9 @@
                   "u64": "217"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -599,7 +659,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -611,6 +671,9 @@
                   "u64": "218"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -627,7 +690,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -639,6 +702,9 @@
                   "u64": "219"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -655,7 +721,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -667,6 +733,9 @@
                   "u64": "220"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -683,7 +752,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -695,6 +764,9 @@
                   "u64": "221"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -711,7 +783,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -723,6 +795,9 @@
                   "u64": "222"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -739,7 +814,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -751,6 +826,9 @@
                   "u64": "223"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -767,7 +845,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -779,6 +857,9 @@
                   "u64": "224"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -795,7 +876,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -807,6 +888,9 @@
                   "u64": "225"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -823,7 +907,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -835,6 +919,9 @@
                   "u64": "226"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -851,7 +938,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -863,6 +950,9 @@
                   "u64": "227"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -879,7 +969,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -891,6 +981,9 @@
                   "u64": "228"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -907,7 +1000,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -919,6 +1012,9 @@
                   "u64": "229"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -935,7 +1031,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -947,6 +1043,9 @@
                   "u64": "230"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -963,7 +1062,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -975,6 +1074,9 @@
                   "u64": "231"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -991,7 +1093,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1003,6 +1105,9 @@
                   "u64": "232"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1019,7 +1124,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1031,6 +1136,9 @@
                   "u64": "233"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1047,7 +1155,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1059,6 +1167,9 @@
                   "u64": "234"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1075,7 +1186,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1087,6 +1198,9 @@
                   "u64": "235"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1103,7 +1217,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1115,6 +1229,9 @@
                   "u64": "236"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1131,7 +1248,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1143,6 +1260,9 @@
                   "u64": "237"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1159,7 +1279,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1171,6 +1291,9 @@
                   "u64": "238"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1187,7 +1310,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1199,6 +1322,9 @@
                   "u64": "239"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1215,7 +1341,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1227,6 +1353,9 @@
                   "u64": "240"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1243,7 +1372,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1255,6 +1384,9 @@
                   "u64": "241"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1271,7 +1403,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1283,6 +1415,9 @@
                   "u64": "242"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1299,7 +1434,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1311,6 +1446,9 @@
                   "u64": "243"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1327,7 +1465,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1339,6 +1477,9 @@
                   "u64": "244"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1355,7 +1496,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1367,6 +1508,9 @@
                   "u64": "245"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1383,7 +1527,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1395,6 +1539,9 @@
                   "u64": "246"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1411,7 +1558,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1423,6 +1570,9 @@
                   "u64": "247"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -1439,7 +1589,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1449,6 +1599,9 @@
                 },
                 {
                   "u64": "250"
+                },
+                {
+                  "i128": "0"
                 },
                 {
                   "bool": true
@@ -1468,7 +1621,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1478,6 +1631,9 @@
                 },
                 {
                   "u64": "120"
+                },
+                {
+                  "i128": "0"
                 },
                 {
                   "bool": true

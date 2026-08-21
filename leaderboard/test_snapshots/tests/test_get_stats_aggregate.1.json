@@ -38,7 +38,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -50,6 +50,9 @@
                   "u64": "20"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -66,7 +69,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -78,6 +81,9 @@
                   "u64": "30"
                 },
                 {
+                  "i128": "0"
+                },
+                {
                   "bool": true
                 }
               ]
@@ -94,7 +100,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "add_pts",
+              "function_name": "reward",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -104,6 +110,9 @@
                 },
                 {
                   "u64": "5"
+                },
+                {
+                  "i128": "0"
                 },
                 {
                   "bool": false

@@ -41,6 +41,22 @@ pub enum LeaderboardError {
     /// reward()/reward_bonus() called with tokens > 0 but no TokenContract
     /// has been set via set_token_contract.
     TokenNotConfigured = 8,
+    /// Issue #18: a retired entry point was invoked. The symbol still
+    /// resolves so old links do not break, but it records nothing — use the
+    /// canonical path named in its doc comment instead.
+    DeprecatedEntryPoint = 9,
+}
+
+/// What kind of activity is being recorded. Selects which counter moves; it
+/// deliberately does NOT decide whether PULSE is minted — that is settled in
+/// exactly one place, `accrue_and_mint` (issue #18).
+#[derive(Clone, Copy, PartialEq)]
+enum Outcome {
+    Win,
+    Loss,
+    /// Referral / welcome award. Counts as activity, but is neither a win
+    /// nor a loss, so no win/loss counter moves.
+    Bonus,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -189,56 +205,33 @@ impl LeaderboardContract {
         Self::set_token_contract(env, admin, token)
     }
 
+    /// Deprecated (issue #18). The exported symbol is retained so anything
+    /// linked against the older ABI still resolves it, but the body records
+    /// nothing and always fails with `DeprecatedEntryPoint`.
+    ///
+    /// It used to be a *second* market-authorized way to record a settled
+    /// bet: identical points and win/loss bookkeeping to `reward`, but with
+    /// no PULSE mint. The same user action therefore produced a different
+    /// token supply depending on which symbol the caller happened to invoke,
+    /// and because both paths wrote byte-identical stats, nothing in storage
+    /// recorded which one had run — so the divergence could never be
+    /// reconciled after the fact.
+    ///
+    /// `reward` is now the single canonical path for a settled bet. To record
+    /// points without minting, call it with `tokens = 0`.
+    ///
+    /// INTERFACE_VERSION is deliberately NOT bumped: no signature, argument
+    /// order or return type changes here, and no deployed caller invokes this
+    /// entry (prediction_market.claim uses `reward`). Bumping it would make
+    /// every dependent contract's compatibility check fail and halt claims.
     pub fn add_pts(
-        env: Env,
-        caller: Address,
-        user: Address,
-        pts: u64,
-        is_won: bool,
+        _env: Env,
+        _caller: Address,
+        _user: Address,
+        _pts: u64,
+        _is_won: bool,
     ) -> Result<(), LeaderboardError> {
-        Self::require_not_paused(&env)?;
-        let market: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::MarketContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != market {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
-        caller.require_auth();
-
-        let mut stats: PlayerStats = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stats(user.clone()))
-            .unwrap_or(PlayerStats {
-                points: 0,
-                total_bets: 0,
-                won_bets: 0,
-                lost_bets: 0,
-            });
-
-        stats.points += pts;
-        stats.total_bets += 1;
-        if is_won {
-            stats.won_bets += 1;
-        } else {
-            stats.lost_bets += 1;
-        }
-
-        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
-        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
-
-        Self::update_top_players(&env, user.clone(), stats.points);
-        // Instance storage (TopPlayerCount, MinPoints, MinSlot, Admin, etc.)
-        // has its own TTL that is never bumped by persistent-key writes above —
-        // refresh it on every write so the leaderboard's cached min survives.
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
-        env.events().publish(
-            (Symbol::new(&env, "leaderboard_updated"), user),
-            (stats.points, stats.won_bets, stats.lost_bets),
-        );
-        Ok(())
+        Err(LeaderboardError::DeprecatedEntryPoint)
     }
 
     // ── reward() / reward_bonus() ──────────────────────────────────────────
@@ -248,6 +241,11 @@ impl LeaderboardContract {
     // add_bonus_pts; the PULSE mint happens here so the callers only pay one
     // cross-contract hop (Lever G).
 
+    /// The canonical way to record a settled bet. Market-only.
+    ///
+    /// Issue #18: this is the sole market-callable path that adds points, and
+    /// the sole path in the contract that can mint PULSE. `tokens = 0` records
+    /// points without minting.
     pub fn reward(
         env: Env,
         caller: Address,
@@ -258,51 +256,14 @@ impl LeaderboardContract {
     ) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
-        let market: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::MarketContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != market {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
-        if points == 0 {
-            return Err(LeaderboardError::InvalidPoints);
-        }
-
-        let mut stats: PlayerStats = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stats(user.clone()))
-            .unwrap_or(PlayerStats {
-                points: 0,
-                total_bets: 0,
-                won_bets: 0,
-                lost_bets: 0,
-            });
-        stats.points += points;
-        stats.total_bets += 1;
-        if is_winner {
-            stats.won_bets += 1;
-        } else {
-            stats.lost_bets += 1;
-        }
-        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
-        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
-
-        Self::update_top_players(&env, user.clone(), stats.points);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
-
-        if tokens > 0 {
-            Self::mint_reward(&env, &user, tokens)?;
-        }
-        env.events().publish(
-            (Symbol::new(&env, "leaderboard_updated"), user),
-            (stats.points, is_winner, tokens),
-        );
-        Ok(())
+        Self::require_market_contract(&env, &caller)?;
+        let outcome = if is_winner { Outcome::Win } else { Outcome::Loss };
+        Self::accrue_and_mint(&env, &user, points, outcome, tokens)
     }
 
+    /// The canonical way to record a referral welcome award. Referral-only.
+    /// Routes through the same accounting core and the same single mint path
+    /// as `reward` (issue #18).
     pub fn reward_bonus(
         env: Env,
         caller: Address,
@@ -312,61 +273,23 @@ impl LeaderboardContract {
     ) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
-        let referral: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::ReferralContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != referral {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
-        if points == 0 {
-            return Err(LeaderboardError::InvalidPoints);
-        }
-
-        let mut stats: PlayerStats = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stats(user.clone()))
-            .unwrap_or(PlayerStats {
-                points: 0,
-                total_bets: 0,
-                won_bets: 0,
-                lost_bets: 0,
-            });
-        stats.points += points;
-        stats.total_bets += 1; // bonus awards count as activity
-        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
-        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
-
-        Self::update_top_players(&env, user.clone(), stats.points);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
-
-        if tokens > 0 {
-            Self::mint_reward(&env, &user, tokens)?;
-        }
-        env.events().publish(
-            (Symbol::new(&env, "leaderboard_updated"), user),
-            (stats.points, tokens),
-        );
-        Ok(())
+        Self::require_referral_contract(&env, &caller)?;
+        Self::accrue_and_mint(&env, &user, points, Outcome::Bonus, tokens)
     }
 
     // Kept for ABI compatibility — total_bets is derived from won + lost +
     // bonus at read time, so a standalone "bet recorded" call is a no-op.
     pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
-        let market: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::MarketContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != market {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
+        Self::require_market_contract(&env, &caller)?;
         caller.require_auth();
         Ok(())
     }
 
+    /// Per-bet referral points. Referral-only, and deliberately does not
+    /// mint: this records a *different* event from `reward_bonus` (a referred
+    /// user placing a bet, versus the one-off welcome award), not a second way
+    /// to record the same one. It therefore routes through the shared
+    /// accounting core but never through the mint path (issue #18).
     pub fn add_bonus_pts(
         env: Env,
         caller: Address,
@@ -374,39 +297,11 @@ impl LeaderboardContract {
         pts: u64,
     ) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
-        let referral: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::ReferralContract)
-            .ok_or(LeaderboardError::NotInitialized)?;
-        if caller != referral {
-            return Err(LeaderboardError::UnauthorizedCaller);
-        }
+        Self::require_referral_contract(&env, &caller)?;
         caller.require_auth();
 
-        let mut stats: PlayerStats = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stats(user.clone()))
-            .unwrap_or(PlayerStats {
-                points: 0,
-                total_bets: 0,
-                won_bets: 0,
-                lost_bets: 0,
-            });
-
-        stats.points += pts;
-        stats.total_bets += 1; // bonus counts as activity
-
-        env.storage().persistent().set(&DataKey::Stats(user.clone()), &stats);
-        env.storage().persistent().extend_ttl(&DataKey::Stats(user.clone()), TTL_BUMP, TTL_HIGH);
-
-        Self::update_top_players(&env, user.clone(), stats.points);
-        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
-        env.events().publish(
-            (Symbol::new(&env, "leaderboard_updated"), user),
-            stats.points,
-        );
+        let stats = Self::accrue(&env, &user, pts, Outcome::Bonus);
+        Self::emit_updated(&env, &user, &stats, 0);
         Ok(())
     }
 
@@ -764,6 +659,95 @@ impl LeaderboardContract {
             }
             _ => {}
         }
+    }
+
+    // ── The canonical accounting core (issue #18) ─────────────────────────
+    //
+    // Before this, four public entry points each open-coded the same
+    // bookkeeping with subtly different side effects. Two of them —
+    // `reward` and `add_pts` — were both authorized to the *market* and both
+    // recorded a settled bet, but only `reward` minted PULSE. Which symbol
+    // the caller happened to invoke therefore changed the token supply for
+    // the same user action, and since both wrote byte-identical stats there
+    // was no way to tell afterwards which had run.
+    //
+    // Now there is exactly one function that writes player state (`accrue`)
+    // and exactly one that mints (`accrue_and_mint`, the only caller of
+    // `mint_reward`). "Points were added" and "tokens were minted" can no
+    // longer come apart, because they are decided in the same place.
+
+    /// The one place player points and activity counters are ever written.
+    /// Returns the updated stats so the caller can emit them.
+    fn accrue(env: &Env, user: &Address, points: u64, outcome: Outcome) -> PlayerStats {
+        let key = DataKey::Stats(user.clone());
+        let mut stats: PlayerStats = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(PlayerStats {
+                points: 0,
+                total_bets: 0,
+                won_bets: 0,
+                lost_bets: 0,
+            });
+
+        stats.points += points;
+        stats.total_bets += 1;
+        match outcome {
+            Outcome::Win => stats.won_bets += 1,
+            Outcome::Loss => stats.lost_bets += 1,
+            // A bonus is activity, but neither a win nor a loss.
+            Outcome::Bonus => {}
+        }
+
+        env.storage().persistent().set(&key, &stats);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+
+        Self::update_top_players(env, user.clone(), stats.points);
+        // Instance storage (TopPlayerCount, MinPoints, MinSlot, Admin, ...)
+        // has its own TTL that persistent-key writes never bump — refresh it
+        // on every write so the leaderboard's cached min survives.
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        stats
+    }
+
+    /// The canonical reward path, and the **only** function in this contract
+    /// that reaches `mint_reward`. Any future minting entry point must route
+    /// through here rather than calling `mint_reward` directly, or the
+    /// single-path invariant this issue fixed is lost again.
+    fn accrue_and_mint(
+        env: &Env,
+        user: &Address,
+        points: u64,
+        outcome: Outcome,
+        tokens: i128,
+    ) -> Result<(), LeaderboardError> {
+        if points == 0 {
+            return Err(LeaderboardError::InvalidPoints);
+        }
+        let stats = Self::accrue(env, user, points, outcome);
+        if tokens > 0 {
+            Self::mint_reward(env, user, tokens)?;
+        }
+        Self::emit_updated(env, user, &stats, tokens);
+        Ok(())
+    }
+
+    /// One event shape for every accrual. The three entry points used to
+    /// publish `leaderboard_updated` with three *different* payloads, so an
+    /// indexer could not tell them apart; carrying `tokens_minted` in the
+    /// same record is also what lets a consumer reconcile points against
+    /// supply, which issue #18 notes was impossible before.
+    fn emit_updated(env: &Env, user: &Address, stats: &PlayerStats, tokens_minted: i128) {
+        env.events().publish(
+            (Symbol::new(env, "leaderboard_updated"), user.clone()),
+            (
+                stats.points,
+                stats.won_bets,
+                stats.lost_bets,
+                tokens_minted,
+            ),
+        );
     }
 
     #[inline]
