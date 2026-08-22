@@ -91,6 +91,11 @@ fn test_register_with_referrer() {
     t.client
         .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
 
+    // Referrer must be a registered user before they can refer others.
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
+
     t.client.register_referral(
         &user,
         &String::from_str(&t.env, "CryptoKing"),
@@ -187,6 +192,23 @@ fn test_reject_self_referral() {
     );
 }
 
+// ── 4b. Reject registration when the supplied referrer is not registered ──────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_reject_unregistered_referrer() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    // This address was never registered — must be rejected.
+    let unregistered_referrer = Address::generate(&t.env);
+
+    t.client.register_referral(
+        &user,
+        &String::from_str(&t.env, "NewUser"),
+        &Some(unregistered_referrer),
+    );
+}
+
 // ── 5. Reject double registration ────────────────────────────────────────────
 
 #[test]
@@ -261,7 +283,8 @@ fn test_credit_with_referrer() {
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
     assert_eq!(xlm_client.balance(&referrer), referral_fee);
 
-    // Welcome + referral points are queued and claimed separately.
+    // Referrer got 3 leaderboard bonus points (plus 5 welcome pts from
+    // their own registration = 8 total).
     let lb_client = leaderboard::LeaderboardContractClient::new(&t.env, &t.leaderboard_id);
     lb_client.claim_pending_rewards(&referrer);
     assert_eq!(lb_client.get_points(&referrer), 8);
@@ -370,7 +393,8 @@ fn test_referrer_bonus_points_accumulate() {
     let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
     sac_admin.mint(&t.referral_id, &1000_0000000_i128);
 
-    // 3 credits → 3 × 3 = 9 bonus pts for referrer
+    // 3 credits → 3 × 3 = 9 bonus pts for referrer; plus 5 welcome pts
+    // from their own registration → 14 total.
     t.client.credit(&t.market, &user, &5_000_000_i128);
     t.client.credit(&t.market, &user, &5_000_000_i128);
     t.client.credit(&t.market, &user, &5_000_000_i128);
@@ -386,6 +410,11 @@ fn test_referrer_bonus_points_accumulate() {
 fn test_referral_count_tracking() {
     let t = setup();
     let referrer = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
+
+    // Referrer must be registered before they can refer others.
     let no_ref: Option<Address> = None;
     t.client
         .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
