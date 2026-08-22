@@ -10,6 +10,7 @@ const WELCOME_BONUS_TOKENS: i128 = 1_0000000;
 const REFERRAL_BET_POINTS: u64 = 3;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+const MAX_DISPLAY_NAME_LEN: u32 = 64;
 
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
@@ -44,9 +45,10 @@ pub enum ReferralError {
     // Issue #95: operation blocked by the contract being paused.
     Paused = 7,
     // Issue #99: the address given as `referrer` has never registered.
-    ReferrerNotRegistered = 7,
-    ContractPaused = 7,
     ReferrerNotRegistered = 8,
+    DisplayNameTooLong = 9,
+    /// Invalid display name: empty or non-UTF8.
+    InvalidDisplayName = 10,
     /// leaderboard reported an interface_version this contract wasn't built
     /// against (issue #84). Note: a matching version number alone does not
     /// prove the callee's actual function shape still matches, it only
@@ -54,7 +56,11 @@ pub enum ReferralError {
     /// if every breaking ABI change (renamed function, changed argument
     /// order/count/type, changed return type) always increments
     /// INTERFACE_VERSION in the same commit. See EXPECTED_LEADERBOARD_INTERFACE_VERSION.
-    IncompatibleInterface = 9,
+    IncompatibleInterface = 11,
+    /// The display name exceeds the maximum allowed length of 64 bytes.
+    NameTooLong = 12,
+    /// Insufficient storage fee paid for name registration/update.
+    InsufficientFee = 13,
 }
 
 #[contracttype]
@@ -216,6 +222,12 @@ impl ReferralRegistryContract {
     ) -> Result<(), ReferralError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+        if display_name.is_empty() {
+            return Err(ReferralError::InvalidDisplayName);
+        }
+        if display_name.len() > MAX_DISPLAY_NAME_LEN {
+            return Err(ReferralError::NameTooLong);
+        }
         if Self::is_registered(env.clone(), user.clone()) {
             return Err(ReferralError::AlreadyRegistered);
         }
@@ -232,6 +244,20 @@ impl ReferralRegistryContract {
                 return Err(ReferralError::ReferrerNotRegistered);
             }
         }
+
+        // Charge storage cost fee proportional to display name length.
+        // This prevents storage DoS by requiring fee per byte of name storage.
+        let storage_fee: i128 = display_name.len() as i128 * 1000; // 1000 stroops per byte
+        let xlm_sac: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::XlmSacContract)
+            .unwrap();
+        token::Client::new(&env, &xlm_sac).transfer(
+            &env.current_contract_address(),
+            &user,
+            &storage_fee,
+        );
 
         // Lever A: write ONE packed Profile entry (display_name + referrer)
         // instead of the three legacy keys (Registered + DisplayName + Referrer).

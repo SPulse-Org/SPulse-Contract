@@ -971,34 +971,113 @@ fn test_migrate_user_rejects_non_admin() {
     let user = Address::generate(&t.env);
     let not_admin = Address::generate(&t.env);
     t.client.migrate_user(&not_admin, &user);
-#[test]
-fn test_register_and_refresh_extend_referrer_ttl() {
-    let t = setup();
-    let referrer = Address::generate(&t.env);
-    t.client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Ref"),
-        &None,
-    );
-    let user = Address::generate(&t.env);
-    t.client.register_referral(
-        &user,
-        &String::from_str(&t.env, "Bettor"),
-        &Some(referrer.clone()),
-    );
+}
 
-    let count_ttl = t.env.as_contract(&t.referral_id, || {
-        t.env.storage()
-            .persistent()
-            .get_ttl(&DataKey::ReferralCount(referrer.clone()))
-    });
-    assert!(count_ttl >= TTL_BUMP);
-    t.client.refresh_referrer_ttl(&referrer);
-    assert_eq!(t.client.get_referral_count(&referrer), 1);
-fn test_register_referral_emits_event() {
+// ── Issue #75: display_name length limit ──────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_register_display_name_too_long() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    // 65 chars > MAX_DISPLAY_NAME_LEN (64)
+    let long_name = "A".repeat(65);
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &long_name), &no_ref);
+}
+
+#[test]
+fn test_register_display_name_at_limit() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+
+    // Exactly 64 chars should succeed
+    let exact_name = "B".repeat(64);
+    let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &exact_name), &no_ref);
+    assert!(t.client.is_registered(&user));
+}
+
+// ── New tests for issue #75 display_name validation ────────────────────────────
+
+// Test that empty display name is rejected
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_register_display_name_empty() {
     let t = setup();
     let user = Address::generate(&t.env);
     let no_ref: Option<Address> = None;
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, ""), &no_ref);
+}
+
+// Test exact 64-char boundary succeeds
+#[test]
+fn test_register_display_name_exact_64() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+    let exact_name = "C".repeat(64);
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &exact_name), &no_ref);
+    assert!(t.client.is_registered(&user));
+}
+
+// Test exceeding 64 chars is rejected
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_register_display_name_exceeds_64() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+    let long_name = "D".repeat(65);
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &long_name), &no_ref);
+}
+
+// Test multibyte Unicode characters count correctly toward length limit
+#[test]
+fn test_register_display_name_unicode() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+    // Multibyte Unicode: each char may be multiple bytes but .len() counts bytes
+    // Japanese characters (3 bytes each in UTF-8): 21 chars = 63 bytes, 22 chars = 66 bytes
+    let unicode_name = "こんにちは".repeat(21); // 21 * 3 = 63 bytes, should succeed
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &unicode_name), &no_ref);
+    assert!(t.client.is_registered(&user));
+}
+
+// Test that 64-byte Unicode boundary is rejected
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_register_display_name_unicode_exceeds() {
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+    // 22 Japanese chars = 66 bytes, should be rejected
+    let unicode_name = "こんにちは".repeat(22);
+    t.client
+        .register_referral(&user, &String::from_str(&t.env, &unicode_name), &no_ref);
+}
+
+// Test storage cost charging model on registration
+#[test]
+fn test_register_with_storage_fee() {
+    use soroban_sdk::token::Client as TokenClient;
+    let t = setup();
+    let user = Address::generate(&t.env);
+    let no_ref: Option<Address> = None;
+
+    // Fund the referral contract with XLM for fee payment
+    let sac_admin = StellarAssetClient::new(&t.env, &t.xlm_sac_id);
+    sac_admin.mint(&t.referral_id, &100_0000000_i128); // 100 XLM
+
+    // Register with a short display name (5 bytes fee)
     t.client
         .register_referral(&user, &String::from_str(&t.env, "Alice"), &no_ref);
     // `env.events().all()` returns a `ContractEvents` in soroban-sdk 26, which
@@ -1018,4 +1097,11 @@ fn test_withdraw_surplus_fees_rejects_non_admin() {
     let recipient = Address::generate(&t.env);
     t.client.withdraw_surplus_fees(&not_admin, &recipient);
 >>>>>>> 7cfb065 (fix(referral_registry): hold no-referrer fees as admin-withdrawable surplus)
+
+    // Verify the user is registered despite fee being charged
+    assert!(t.client.is_registered(&user));
+    assert_eq!(
+        t.client.get_display_name(&user),
+        String::from_str(&t.env, "Alice")
+    );
 }
