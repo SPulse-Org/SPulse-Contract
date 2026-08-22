@@ -1,9 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
-    contract, contracterror, contractimpl, contracttype, vec, Address, Env, IntoVal, Symbol, Val,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, IntoVal, Symbol,
+    Val, Vec,
 };
 
 pub const MAX_TOP_PLAYERS: u32 = 50;
@@ -19,6 +18,10 @@ const MAX_TOP_PLAYERS: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 20;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
+
+// Issue #100 invariant matrix (compile-time).
+const _: () = assert!(MAX_TOP_PLAYERS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
 
 // ── Point decay (issue #69) ──────────────────────────────────────────────────
 //
@@ -77,6 +80,10 @@ pub const INTERFACE_VERSION: u32 = 1;
 // mint() signature/argument order/return type that this contract relies on.
 const EXPECTED_TOKEN_INTERFACE_VERSION: u32 = 1;
 
+const MAX_GOVERNORS: u32 = 10;
+// Issue #5: 24h timelock between upgrade proposal and execution.
+const UPGRADE_DELAY_SECS: u64 = 86_400;
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -98,6 +105,14 @@ pub enum LeaderboardError {
     /// reward()/reward_bonus() called with tokens > 0 but no TokenContract
     /// has been set via set_token_contract.
     TokenNotConfigured = 8,
+    // Issue #5: timelocked + multi-sig upgrade governance.
+    NotGovernor = 9,
+    UpgradeExists = 10,
+    NoUpgrade = 11,
+    UpgradeTooSoon = 12,
+    AlreadyApproved = 13,
+    InsufficientApprovals = 14,
+    InvalidThreshold = 15,
 }
 
 // OPT: was 4 separate keys per user (Points, TotalBets, WonBets, LostBets).
@@ -137,6 +152,11 @@ pub enum DataKey {
     // Pull-based reward queue (issue #86). Expensive sorting and token minting
     // happen later in claim_pending_rewards, outside critical fund paths.
     PendingReward(Address),
+    // Issue #5: governance for timelocked WASM upgrades.
+    Governor(Address),
+    GovernorCount,
+    GovernorThreshold,
+    PendingUpgrade,
 }
 
 // OPT: PlayerEntry now embeds points directly (avoids a Stats read during sort)
@@ -220,6 +240,23 @@ pub struct PendingReward {
     pub bet_delta: u32,
 }
 
+/// Timelocked, multi-sig WASM upgrade (issue #5).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgradeChange {
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub requested_at: u64,
+    pub approvers: soroban_sdk::Vec<Address>,
+}
+
+// Emitted when an upgrade is proposed, so off-chain monitors can alert.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeStaged {
+    pub pending_at: u64,
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -247,6 +284,15 @@ impl LeaderboardContract {
         env.storage().instance().set(&DataKey::TopPlayerCount, &0_u32);
         env.storage().instance().set(&DataKey::MinPoints, &0_u64);
         env.storage().instance().set(&DataKey::MinSlot, &0_u32);
+        // Bootstrap governance: the initializer is the first governor with
+        // a 1-of-1 threshold (issue #5).
+        env.storage()
+            .persistent()
+            .set(&DataKey::Governor(admin.clone()), &true);
+        env.storage().instance().set(&DataKey::GovernorCount, &1_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorThreshold, &1_u32);
         env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
@@ -331,6 +377,235 @@ impl LeaderboardContract {
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    // ── Timelocked WASM upgrade (issue #5) ───────────────────────────────
+    // A single compromised admin key can no longer atomically replace the
+    // contract's bytecode. The upgrade must be: (1) proposed by a governor,
+    // (2) approved by GovernorThreshold governors, and (3) mature past
+    // UPGRADE_DELAY_SECS before execution. Any governor may cancel in
+    // between. Off-chain monitors receive an UpgradeStaged event.
+
+    /// Propose a WASM upgrade. Does NOT take effect immediately.
+    pub fn propose_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<(), LeaderboardError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            return Err(LeaderboardError::UpgradeExists);
+        }
+        let mut approvers: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        approvers.push_back(caller.clone());
+        let pending = PendingUpgradeChange {
+            new_wasm_hash: new_wasm_hash.clone(),
+            requested_at: env.ledger().timestamp(),
+            approvers,
+        };
+        let staged = UpgradeStaged {
+            pending_at: pending.requested_at,
+            new_wasm_hash,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &pending);
+        staged.publish(&env);
+        Ok(())
+    }
+
+    /// A governor attests a pending WASM upgrade during the dispute window.
+    pub fn approve_upgrade(env: Env, caller: Address) -> Result<u32, LeaderboardError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        let mut pending: PendingUpgradeChange = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(LeaderboardError::NoUpgrade)?;
+        if Self::approver_index(&pending.approvers, &caller).is_some() {
+            return Err(LeaderboardError::AlreadyApproved);
+        }
+        pending.approvers.push_back(caller.clone());
+        let count = pending.approvers.len();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &pending);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_ok"), caller),
+            count,
+        );
+        Ok(count)
+    }
+
+    /// Activate a matured, sufficiently-approved WASM upgrade.
+    pub fn execute_upgrade(env: Env, caller: Address) -> Result<(), LeaderboardError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        let pending: PendingUpgradeChange = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(LeaderboardError::NoUpgrade)?;
+
+        let now = env.ledger().timestamp();
+        if now < pending.requested_at
+            || now - pending.requested_at < UPGRADE_DELAY_SECS
+        {
+            return Err(LeaderboardError::UpgradeTooSoon);
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorThreshold)
+            .unwrap_or(1);
+        if pending.approvers.len() < threshold {
+            return Err(LeaderboardError::InsufficientApprovals);
+        }
+
+        env.deployer()
+            .update_current_contract_wasm(pending.new_wasm_hash);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_exec"), caller),
+            pending.new_wasm_hash,
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending WASM upgrade during the dispute window.
+    pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), LeaderboardError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        if !env.storage().instance().has(&DataKey::PendingUpgrade) {
+            return Err(LeaderboardError::NoUpgrade);
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_can"), caller),
+            1_u32,
+        );
+        Ok(())
+    }
+
+    /// Read the currently staged (not yet effective) upgrade, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgradeChange> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    // ── Governor management (issue #5) ──────────────────────────────────
+
+    pub fn add_governor(env: Env, admin: Address, governor: Address) -> Result<(), LeaderboardError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(LeaderboardError::NotInitialized)?;
+        if admin != stored {
+            return Err(LeaderboardError::NotAdmin);
+        }
+        admin.require_auth();
+        let key = DataKey::Governor(governor.clone());
+        if env.storage().persistent().get(&key).unwrap_or(false) {
+            return Ok(());
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorCount)
+            .unwrap_or(0);
+        if count >= MAX_GOVERNORS {
+            return Err(LeaderboardError::InvalidThreshold);
+        }
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorCount, &(count + 1));
+        Ok(())
+    }
+
+    pub fn remove_governor(env: Env, admin: Address, governor: Address) -> Result<(), LeaderboardError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(LeaderboardError::NotInitialized)?;
+        if admin != stored {
+            return Err(LeaderboardError::NotAdmin);
+        }
+        admin.require_auth();
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorCount)
+            .unwrap_or(0);
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorThreshold)
+            .unwrap_or(1);
+        if count <= threshold {
+            return Err(LeaderboardError::InvalidThreshold);
+        }
+        let key = DataKey::Governor(governor);
+        if !env.storage().persistent().get(&key).unwrap_or(false) {
+            return Err(LeaderboardError::NotGovernor);
+        }
+        env.storage().persistent().remove(&key);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorCount, &(count - 1));
+        Ok(())
+    }
+
+    pub fn set_governor_threshold(
+        env: Env,
+        admin: Address,
+        threshold: u32,
+    ) -> Result<(), LeaderboardError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(LeaderboardError::NotInitialized)?;
+        if admin != stored {
+            return Err(LeaderboardError::NotAdmin);
+        }
+        admin.require_auth();
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorCount)
+            .unwrap_or(0);
+        if threshold == 0 || threshold > count {
+            return Err(LeaderboardError::InvalidThreshold);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorThreshold, &threshold);
+        Ok(())
+    }
+
+    pub fn is_governor(env: Env, account: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Governor(account))
+            .unwrap_or(false)
+    }
+
+    pub fn get_governor_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::GovernorThreshold)
+            .unwrap_or(1)
+    }
+
+    pub fn get_governor_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::GovernorCount)
+            .unwrap_or(0)
     }
 
     pub fn reward(
@@ -1873,6 +2148,30 @@ impl LeaderboardContract {
             vec![env, this.into_val(env), user.into_val(env), tokens.into_val(env)],
         );
         Ok(())
+    }
+
+    // Issue #5: governor helpers for upgrade governance.
+
+    fn require_governor(env: &Env, caller: &Address) -> Result<(), LeaderboardError> {
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Governor(caller.clone()))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        Err(LeaderboardError::NotGovernor)
+    }
+
+    fn approver_index(approvers: &soroban_sdk::Vec<Address>, who: &Address) -> Option<u32> {
+        let n = approvers.len();
+        for i in 0..n {
+            if approvers.get(i).unwrap() == *who {
+                return Some(i);
+            }
+        }
+        None
     }
 }
 

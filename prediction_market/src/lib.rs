@@ -33,16 +33,13 @@ const MAX_MARKETS_PER_HOUR: u32 = 10;
 const MIN_MARKET_DURATION_SECS: u64 = 60; // issue #10: no instantly-expired markets
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
-// Fee adjustments: multiply before divide to avoid precision.
-// net and total_fee are derived from ONE family so that
-// `net + total_fee == amount` ALWAYS holds (no stroop leakage):
-//   net       = floor(amount * 0.98)
-//   total_fee = amount - net = ceil(amount * 0.02)
-// (TOTAL fee rate is effectively 200 bps — split into 150 bps platform and
-// the remainder referral once the platform share is resolved.)
+// Fee adjustments — multiply before divide to avoid precision.
+// Issue #100 — SINGLE SOURCE OF TRUTH: NET_NUMERATOR is DERIVED from the fee
+// constants, so NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM can never drift.
+const TOTAL_FEE_BPS: i128 = 200;
 const PLATFORM_FEE_BPS: i128 = 150;
 const BPS_DENOM: i128 = 10_000;
-const NET_NUMERATOR: i128 = 9_800;
+const NET_NUMERATOR: i128 = BPS_DENOM - TOTAL_FEE_BPS;
 
 const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
@@ -53,6 +50,18 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // path is timelocked, so a compromised fee recipient cannot drain the whole
 // accumulator to an arbitrary address in one call.
 const WITHDRAW_DELAY_SECS: u64 = 86_400; // 24h timelock between request and payout
+
+// ── Issue #100: compile-time invariant matrix ────────────────────────────────
+// Every cross-constant relationship the protocol depends on is asserted at
+// compile time, so an unsafe combination can never be introduced silently.
+const _: () = assert!(TOTAL_FEE_BPS > 0 && TOTAL_FEE_BPS < BPS_DENOM);
+const _: () = assert!(PLATFORM_FEE_BPS > 0 && PLATFORM_FEE_BPS <= TOTAL_FEE_BPS);
+const _: () = assert!(NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM);
+const _: () = assert!(MIN_BET > 0);
+const _: () = assert!(MAX_BETS_PER_USER > 0 && MAX_MARKETS_PER_HOUR > 0);
+const _: () = assert!(MAX_WITHDRAWAL_BPS > 0 && MAX_WITHDRAWAL_BPS <= BPS_DENOM);
+const _: () = assert!(WITHDRAW_DELAY_SECS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
 const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated fees
 const CONFIG_DELAY_SECS: u64 = 86_400; // issue #51: dispute window before Config is live
 const MAX_GOVERNORS: u32 = 10;
@@ -127,6 +136,10 @@ pub enum MarketError {
     /// A dependency (referral_registry or leaderboard) reported an
     /// interface_version this contract wasn't built against (issue #84).
     IncompatibleInterface = 36,
+    // Issue #5: timelocked + multi-sig upgrade governance.
+    UpgradeExists = 37,
+    NoUpgrade = 38,
+    UpgradeTooSoon = 39,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -163,6 +176,7 @@ pub enum DataKey {
     GovernorCount,
     GovernorThreshold,
     PendingConfig,
+    PendingUpgrade,
     PinnedHashes,
     // ── Emergency circuit-breaker (issue #83) ─────────────────────────────
     Paused,
@@ -211,6 +225,24 @@ pub struct PendingConfigChange {
     pub hashes: PinnedHashes,
     pub requested_at: u64,
     pub approvers: Vec<Address>,
+}
+
+/// Timelocked, multi-sig WASM upgrade. Inactive until execute_upgrade (issue #5).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgradeChange {
+    pub new_wasm_hash: BytesN<32>,
+    pub requested_at: u64,
+    pub approvers: Vec<Address>,
+}
+
+// Emitted when an upgrade is proposed, so off-chain monitors can alert before
+// the timelock matures (issue #5).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeStaged {
+    pub pending_at: u64,
+    pub new_wasm_hash: BytesN<32>,
 }
 
 // ── BetEntry: Bet + Gross + BetCount in one slot ──────────────────────────
@@ -354,13 +386,120 @@ impl PredictionMarketContract {
     // Allows fixing a bad config (e.g. wrong XLM SAC) or shipping a bug fix
     // without redeploying and losing all markets/bets/contract address.
 
-    /// Replace this contract's WASM bytecode in place. Admin only.
-    /// Storage is preserved — only the executable changes.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MarketError> {
-        Self::require_admin(&env, &admin)?;
-        admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    // ── Timelocked WASM upgrade (issue #5) ───────────────────────────────
+    // A single compromised admin key can no longer atomically replace the
+    // contract's bytecode. The upgrade must be: (1) proposed by a governor,
+    // (2) approved by GovernorThreshold governors, and (3) mature past
+    // CONFIG_CHANGE_DELAY_SECS before execution. Any governor may cancel in
+    // between. Off-chain monitors receive an UpgradeStaged event to alert
+    // users.
+
+    /// Propose a WASM upgrade. Does NOT take effect immediately.
+    pub fn propose_upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), MarketError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        if env.storage().instance().has(&DataKey::PendingUpgrade) {
+            return Err(MarketError::UpgradeExists);
+        }
+        let mut approvers: Vec<Address> = Vec::new(&env);
+        approvers.push_back(caller.clone());
+        let pending = PendingUpgradeChange {
+            new_wasm_hash: new_wasm_hash.clone(),
+            requested_at: env.ledger().timestamp(),
+            approvers,
+        };
+        let staged = UpgradeStaged {
+            pending_at: pending.requested_at,
+            new_wasm_hash,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &pending);
+        staged.publish(&env);
         Ok(())
+    }
+
+    /// A governor attests a pending WASM upgrade during the dispute window.
+    pub fn approve_upgrade(env: Env, caller: Address) -> Result<u32, MarketError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        let mut pending: PendingUpgradeChange = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(MarketError::NoUpgrade)?;
+        if Self::approver_index(&pending.approvers, &caller).is_some() {
+            return Err(MarketError::AlreadyApproved);
+        }
+        pending.approvers.push_back(caller.clone());
+        let count = pending.approvers.len();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgrade, &pending);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_ok"), caller),
+            count,
+        );
+        Ok(count)
+    }
+
+    /// Activate a matured, sufficiently-approved WASM upgrade.
+    pub fn execute_upgrade(env: Env, caller: Address) -> Result<(), MarketError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        let pending: PendingUpgradeChange = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(MarketError::NoUpgrade)?;
+
+        let now = env.ledger().timestamp();
+        if now < pending.requested_at
+            || now - pending.requested_at < CONFIG_CHANGE_DELAY_SECS
+        {
+            return Err(MarketError::UpgradeTooSoon);
+        }
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorThreshold)
+            .unwrap_or(1);
+        if pending.approvers.len() < threshold {
+            return Err(MarketError::InsufficientApprovals);
+        }
+
+        env.deployer()
+            .update_current_contract_wasm(pending.new_wasm_hash);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_exec"), caller),
+            pending.new_wasm_hash,
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending WASM upgrade during the dispute window.
+    pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), MarketError> {
+        caller.require_auth();
+        Self::require_governor(&env, &caller)?;
+        if !env.storage().instance().has(&DataKey::PendingUpgrade) {
+            return Err(MarketError::NoUpgrade);
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_can"), caller),
+            1_u32,
+        );
+        Ok(())
+    }
+
+    /// Read the currently staged (not yet effective) upgrade, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgradeChange> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     /// Stage a config change (token / referral / leaderboard / xlm_sac). Admin
