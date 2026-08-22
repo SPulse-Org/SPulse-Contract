@@ -20,6 +20,10 @@ const MAX_PAGE_SIZE: u32 = 20;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 
+pub const EVENT_PLAYER_REMOVED: Symbol = Symbol::new("PlayerRemoved");
+pub const EVENT_PLAYER_BANNED: Symbol = Symbol::new("PlayerBanned");
+pub const EVENT_POINTS_SET: Symbol = Symbol::new("PlayerPointsSet");
+
 // ── Point decay (issue #69) ──────────────────────────────────────────────────
 //
 // Points used to only ever increase, which made the board a cumulative
@@ -134,6 +138,8 @@ pub enum DataKey {
     // A player's TopPlayerAt entry is written at the same moment as their
     // Stats, so this one stamp dates both.
     StatsEpoch(Address),
+    // Banned players are fully purged from the top list and marked as banned.
+    Banned(Address),
     // Pull-based reward queue (issue #86). Expensive sorting and token minting
     // happen later in claim_pending_rewards, outside critical fund paths.
     PendingReward(Address),
@@ -1848,6 +1854,19 @@ impl LeaderboardContract {
         Ok(())
     }
 
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), LeaderboardError> {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(LeaderboardError::NotInitialized)?;
+        if admin != &stored {
+            return Err(LeaderboardError::NotAdmin);
+        }
+        admin.require_auth();
+        Ok(())
+    }
+
     // Issue #84: check pulse_token's reported ABI version before invoking mint.
     fn require_compatible_token(env: &Env, token: &Address) -> Result<(), LeaderboardError> {
         let version: u32 =
@@ -1874,7 +1893,101 @@ impl LeaderboardContract {
         );
         Ok(())
     }
-}
+
+    /// Remove a player from the top list entirely. Admin only.
+    /// Triggers full list recomputation and min-cache refresh.
+    pub fn remove_player(env: Env, admin: Address, user: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+
+        let count = Self::top_count(&env);
+
+        // Check if player is in the top list and remove them.
+        let mut removed = false;
+        for i in 0..count {
+            if let Some(entry) = Self::forward_entry(&env, i) {
+                if entry.address == user {
+                    // Clear the reverse lookup and forward entry.
+                    Self::clear_top_slot(&env, i);
+                    removed = true;
+                    break;
+                }
+            }
+        }
+
+        // Repair the top index to compact any holes and refresh min cache.
+        let repaired_count = Self::repair_top_index(&env);
+        Self::refresh_min(&env, repaired_count);
+
+        if removed {
+            env.events().publish((
+                EVENT_PLAYER_REMOVED,
+                user,
+                repaired_count,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ban a player, completely removing them from the top list and marking
+    /// them as banned. Admin only. The banned address is purged from the
+    /// top list entirely, even if they have non-zero points.
+    pub fn ban_player(env: Env, admin: Address, user: Address) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+
+        // Mark the user as banned.
+        let banned_key = DataKey::Banned(user.clone());
+        env.storage().instance().set(&banned_key, &true);
+
+        // Purge the user from the top list entirely.
+        let count = Self::top_count(&env);
+        let mut purged = false;
+        for i in 0..count {
+            if let Some(entry) = Self::forward_entry(&env, i) {
+                if entry.address == user {
+                    Self::clear_top_slot(&env, i);
+                    purged = true;
+                    break;
+                }
+            }
+        }
+
+        // Repair the top index to compact any holes and refresh min cache.
+        let repaired_count = Self::repair_top_index(&env);
+        Self::refresh_min(&env, repaired_count);
+
+        env.events().publish((
+            EVENT_PLAYER_BANNED,
+            user,
+            repaired_count,
+        ));
+        Ok(())
+    }
+
+    /// Set a player's points, which re-sorts the entire leaderboard.
+    /// Admin only. This modifies the player's points and re-inserts them
+    /// into the top list, triggering a full recompute.
+    pub fn set_player_points(
+        env: Env,
+        admin: Address,
+        user: Address,
+        new_points: u64,
+    ) -> Result<(), LeaderboardError> {
+        Self::require_admin(&env, &admin)?;
+
+        // Credit the new points (this also updates stats).
+        Self::credit_points(&env, &user, new_points, None);
+
+        // Refresh the top list and min cache.
+        let count = Self::top_count(&env);
+        Self::refresh_min(&env, count);
+
+        env.events().publish((
+            EVENT_POINTS_SET,
+            user.clone(),
+            new_points,
+        ));
+        Ok(())
+    }
 
 #[cfg(test)]
 mod decay_tests;
