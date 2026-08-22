@@ -806,3 +806,109 @@ fn test_add_pts_always_rejected() {
         other => panic!("add_pts returned unexpected error: {:?}", other),
     }
 }
+
+#[test]
+fn test_ban_player_admin_auth() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    let rando = Address::generate(&env);
+    let result = client.ban_player(&rando, &user);
+    assert!(result.is_err(), "ban_player should reject non-admin");
+    match result {
+        Err(LeaderboardError::NotAdmin) => {}
+        other => panic!("ban_player returned unexpected error: {:?}", other),
+    }
+}
+
+#[test]
+fn test_unban_player_admin_auth() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    let rando = Address::generate(&env);
+    let result = client.unban_player(&rando, &user);
+    assert!(result.is_err(), "unban_player should reject non-admin");
+    match result {
+        Err(LeaderboardError::NotAdmin) => {}
+        other => panic!("unban_player returned unexpected error: {:?}", other),
+    }
+}
+
+#[test]
+fn test_ban_player_changes_ban_state() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    assert!(client.is_banned(&user) == false);
+    client.ban_player(&admin, &user);
+    assert!(client.is_banned(&user) == true);
+}
+
+#[test]
+fn test_unban_player_clears_ban_state() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    client.ban_player(&admin, &user);
+    assert!(client.is_banned(&user) == true);
+    client.unban_player(&admin, &user);
+    assert!(client.is_banned(&user) == false);
+}
+
+#[test]
+fn test_set_player_points_absolute_value() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    // Set points to 50
+    client.set_player_points(&admin, &user, &50_u64);
+    assert_eq!(client.get_points(&user), 50);
+
+    // Set points again to 20 (should be absolute set, not accumulation)
+    client.set_player_points(&admin, &user, &20_u64);
+    assert_eq!(client.get_points(&user), 20);
+
+    // Set to 0
+    client.set_player_points(&admin, &user, &0_u64);
+    assert_eq!(client.get_points(&user), 0);
+}
+
+#[test]
+fn test_set_player_points_admin_auth() {
+    let (env, client, admin, _market, _referral) = setup();
+    let user = Address::generate(&env);
+    let rando = Address::generate(&env);
+    let result = client.set_player_points(&rando, &user, &100_u64);
+    assert!(result.is_err(), "set_player_points should reject non-admin");
+    match result {
+        Err(LeaderboardError::NotAdmin) => {}
+        other => panic!("set_player_points returned unexpected error: {:?}", other),
+    }
+}
+
+#[test]
+fn test_banned_player_no_points() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    // Ban the user before awarding points
+    client.ban_player(&admin, &user);
+    // Try to award points via reward (should be blocked by require_not_banned)
+    let result = client.reward(&market, &user, &50_u64, &0_i128, &true);
+    assert!(result.is_err(), "reward should reject banned player");
+    assert_eq!(result.unwrap_err(), LeaderboardError::PlayerBanned);
+    // Points should still be 0
+    assert_eq!(client.get_points(&user), 0);
+}
+
+#[test]
+fn test_banned_player_not_in_top_list() {
+    let (env, client, admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+    // Add points for the other user so they're in the top list
+    client.add_pts(&market, &other, &100_u64, &true);
+    // Ban the user
+    client.ban_player(&admin, &user);
+    // User should not be in top list
+    let top = client.get_top_players(&0_u32, &20_u32);
+    let user_in_top = top.iter().any(|e| e.address == user);
+    assert!(!user_in_top, "banned player should not appear in top list");
+    // User's rank should be UNRANKED_RANK
+    assert_eq!(client.get_rank(&user), UNRANKED_RANK);
+}
