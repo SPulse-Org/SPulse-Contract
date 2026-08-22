@@ -33,16 +33,13 @@ const MAX_MARKETS_PER_HOUR: u32 = 10;
 const MIN_MARKET_DURATION_SECS: u64 = 60; // issue #10: no instantly-expired markets
 const MAX_BETTORS_PER_PAGE: u32 = 100;
 
-// Fee adjustments: multiply before divide to avoid precision.
-// net and total_fee are derived from ONE family so that
-// `net + total_fee == amount` ALWAYS holds (no stroop leakage):
-//   net       = floor(amount * 0.98)
-//   total_fee = amount - net = ceil(amount * 0.02)
-// (TOTAL fee rate is effectively 200 bps — split into 150 bps platform and
-// the remainder referral once the platform share is resolved.)
+// Fee adjustments — multiply before divide to avoid precision.
+// Issue #100 — SINGLE SOURCE OF TRUTH: NET_NUMERATOR is DERIVED from the fee
+// constants, so NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM can never drift.
+const TOTAL_FEE_BPS: i128 = 200;
 const PLATFORM_FEE_BPS: i128 = 150;
 const BPS_DENOM: i128 = 10_000;
-const NET_NUMERATOR: i128 = 9_800;
+const NET_NUMERATOR: i128 = BPS_DENOM - TOTAL_FEE_BPS;
 
 const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
@@ -53,6 +50,18 @@ const LOSE_TOKENS: i128 = 2_0000000;
 // path is timelocked, so a compromised fee recipient cannot drain the whole
 // accumulator to an arbitrary address in one call.
 const WITHDRAW_DELAY_SECS: u64 = 86_400; // 24h timelock between request and payout
+
+// ── Issue #100: compile-time invariant matrix ────────────────────────────────
+// Every cross-constant relationship the protocol depends on is asserted at
+// compile time, so an unsafe combination can never be introduced silently.
+const _: () = assert!(TOTAL_FEE_BPS > 0 && TOTAL_FEE_BPS < BPS_DENOM);
+const _: () = assert!(PLATFORM_FEE_BPS > 0 && PLATFORM_FEE_BPS <= TOTAL_FEE_BPS);
+const _: () = assert!(NET_NUMERATOR + TOTAL_FEE_BPS == BPS_DENOM);
+const _: () = assert!(MIN_BET > 0);
+const _: () = assert!(MAX_BETS_PER_USER > 0 && MAX_MARKETS_PER_HOUR > 0);
+const _: () = assert!(MAX_WITHDRAWAL_BPS > 0 && MAX_WITHDRAWAL_BPS <= BPS_DENOM);
+const _: () = assert!(WITHDRAW_DELAY_SECS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
 const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated fees
 const CONFIG_DELAY_SECS: u64 = 86_400; // issue #51: dispute window before Config is live
 const MAX_GOVERNORS: u32 = 10;

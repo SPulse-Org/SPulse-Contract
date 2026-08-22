@@ -13,6 +13,12 @@ const MAX_REFERRAL_EARNINGS: i128 = 500_000_000_000;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 
+// Issue #100 invariant matrix (incentive/reward group).
+const _: () = assert!(WELCOME_BONUS_POINTS > 0);
+const _: () = assert!(REFERRAL_BET_POINTS > 0);
+const _: () = assert!(WELCOME_BONUS_TOKENS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
+
 // Issue #84: bump whenever a function signature, argument order, or return
 // type that a caller relies on changes.
 pub const INTERFACE_VERSION: u32 = 1;

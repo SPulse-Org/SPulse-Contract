@@ -19,6 +19,10 @@ const MAX_PAGE_SIZE: u32 = 20;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 
+// Issue #100 invariant matrix (compile-time).
+const _: () = assert!(MAX_TOP_PLAYERS > 0);
+const _: () = assert!(TTL_BUMP > 0 && TTL_BUMP <= TTL_HIGH);
+
 // ── Point decay (issue #69) ──────────────────────────────────────────────────
 //
 // Points used to only ever increase, which made the board a cumulative

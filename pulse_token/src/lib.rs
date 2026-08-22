@@ -10,6 +10,13 @@ use soroban_sdk::{
 // detect an incompatible upgrade before invoking.
 pub const INTERFACE_VERSION: u32 = 1;
 
+// Issue #100: hard cap on the total PULSE supply (1_000_000_000 tokens with
+// 7 decimals). This bounds the combined welcome-bonus + betting-reward minting
+// forever, so no parameter combination (referral depth, bet count, points) can
+// inflate supply without bound.
+const MAX_SUPPLY: i128 = 1_000_000_000_0000000;
+const _: () = assert!(MAX_SUPPLY > 0);
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -36,6 +43,8 @@ pub enum TokenError {
     AlreadyApproved = 17,
     InsufficientApprovals = 18,
     InvalidThreshold = 19,
+    // Issue #100: mint would exceed the hard supply cap.
+    SupplyCapExceeded = 20,
 }
 
 // TTL: ~1yr threshold, ~2yr extend
@@ -505,6 +514,15 @@ impl PULSETokenContract {
         if !is_minter {
             return Err(TokenError::UnauthorizedMinter);
         }
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        // Issue #100: enforce the hard supply cap before any state change.
+        if amount > MAX_SUPPLY.saturating_sub(supply) {
+            return Err(TokenError::SupplyCapExceeded);
+        }
         let balance = Self::balance(env.clone(), to.clone());
         let to_key = DataKey::Balance(to.clone());
         env.storage()
@@ -513,12 +531,6 @@ impl PULSETokenContract {
         env.storage()
             .persistent()
             .extend_ttl(&to_key, TTL_BUMP, TTL_HIGH);
-            .set(&DataKey::Balance(to.clone()), &(balance + amount));
-        let supply: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalSupply)
-            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &(supply + amount));
