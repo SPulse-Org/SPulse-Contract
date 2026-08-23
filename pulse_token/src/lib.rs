@@ -36,7 +36,7 @@ pub enum TokenError {
     InsufficientAllowance = 7,
     InvalidExpirationLedger = 8,
     // Issue #95: operation blocked because the contract is paused.
-    ContractPaused = 9,
+    Paused = 9,
     AlreadyMinter = 10,
     NotMinter = 11,
     MinterListFull = 12,
@@ -292,7 +292,8 @@ impl PULSETokenContract {
     }
 
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
-        Self::require_not_paused(&env)?;
+        // Deliberately NOT pause-gated: holders must always be able to move
+        // their own funds, even while mint/burn are halted (issue #95).
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
         }
@@ -509,7 +510,7 @@ impl PULSETokenContract {
 
     fn require_not_paused(env: &Env) -> Result<(), TokenError> {
         if Self::is_paused(env.clone()) {
-            return Err(TokenError::ContractPaused);
+            return Err(TokenError::Paused);
         }
         Ok(())
     }
