@@ -5,6 +5,9 @@ use soroban_sdk::{
     IntoVal, String, Symbol, Val, Vec,
 };
 
+#[cfg(any(test, feature = "testutils"))]
+use soroban_sdk::testutils::storage::Persistent as _;
+
 // ── Event schema (issue #52) ────────────────────────────────────────────────
 // Topics: (event_name: Symbol, actor: Address [, market_id: u64])
 // Data:   state deltas so an indexer can rebuild history without polling.
@@ -443,13 +446,14 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::PinnedHashes, &pending.hashes);
         env.storage().instance().remove(&DataKey::PendingConfig);
+        let activated = pending.cfg.clone();
         env.events().publish(
-            (Symbol::new(&env, "cfg_act"), caller),
-            pending.cfg,
+            (Symbol::new(&env, "cfg_act"), caller.clone()),
+            activated.clone(),
         );
         env.events().publish(
-            (Symbol::new(&env, "config_changed"), admin),
-            (token_contract, referral_contract, leaderboard_contract, xlm_sac),
+            (Symbol::new(&env, "config_changed"), caller),
+            activated,
         );
         Ok(())
     }
@@ -571,6 +575,8 @@ impl PredictionMarketContract {
             .instance()
             .get(&DataKey::GovernorCount)
             .unwrap_or(0)
+    }
+
     /// The cross-contract ABI version this deployment implements (issue #84).
     pub fn interface_version(_env: Env) -> u32 {
         INTERFACE_VERSION
@@ -793,8 +799,9 @@ impl PredictionMarketContract {
         // ── Issue 89: Write ALL state BEFORE external calls (check-effects-interaction) ──
 
         // Credit only the platform fee to this market's ledger. The referral
-        // fee is either sent to the referrer or held by the referral contract
-        // as surplus (issue #78), so the market never holds it for withdrawal.
+        // fee follows below: it is paid to a *registered* referrer, or kept
+        // here as platform revenue when the bettor has no registered
+        // referrer — never shipped blind to an arbitrary address.
         Self::credit_market_fees(&env, market_id, platform_fee);
 
         // ── Write BetEntry (net + gross + count in one write) ─────────────
@@ -863,24 +870,55 @@ impl PredictionMarketContract {
             false
         } else {
             Self::require_compatible_referral(&env, &cfg.referral)?;
-            xlm.transfer(&this, &cfg.referral, &referral_fee);
-            let result: bool = env.invoke_contract(
+
+            // Resolve the bettor's referrer and prove it is a registered
+            // participant BEFORE moving any funds (issue: unregistered
+            // referrers must never get paid). A user-chosen "referrer" that
+            // is not in the registry's ReferrerInfo storage is treated as
+            // referrer-less and the 50 bps stays here as platform revenue.
+            let referrer: Option<Address> = env.invoke_contract(
                 &cfg.referral,
-                &Symbol::new(&env, "credit"),
-                vec![
-                    &env,
-                    this.clone().into_val(&env),
-                    user.clone().into_val(&env),
-                    referral_fee.into_val(&env),
-                ],
+                &Symbol::new(&env, "get_referrer"),
+                vec![&env, user.clone().into_val(&env)],
             );
-            if cached.is_none() {
-                env.storage().persistent().set(&hr_key, &result);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
+            let registered = match &referrer {
+                Some(ref_addr) => env.invoke_contract::<bool>(
+                    &cfg.referral,
+                    &Symbol::new(&env, "is_registered_referrer"),
+                    vec![&env, ref_addr.into_val(&env)],
+                ),
+                None => false,
+            };
+
+            if !registered {
+                Self::credit_market_fees(&env, market_id, referral_fee);
+                if cached.is_none() {
+                    env.storage().persistent().set(&hr_key, &false);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
+                }
+                false
+            } else {
+                xlm.transfer(&this, &cfg.referral, &referral_fee);
+                let result: bool = env.invoke_contract(
+                    &cfg.referral,
+                    &Symbol::new(&env, "credit"),
+                    vec![
+                        &env,
+                        this.clone().into_val(&env),
+                        user.clone().into_val(&env),
+                        referral_fee.into_val(&env),
+                    ],
+                );
+                if cached.is_none() {
+                    env.storage().persistent().set(&hr_key, &result);
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
+                }
+                result
             }
-            result
         };
 
         // ── Release reentrancy lock ──────────────────────────────────────
@@ -1452,6 +1490,11 @@ impl PredictionMarketContract {
 
     /// Remaining TTL (ledgers) of the Market key. 0 means missing/expired —
     /// integrators can warn before funds become unrecoverable (issue #54).
+    ///
+    /// Reading a TTL is only possible via the SDK's testutils trait, so this
+    /// view exists in test/dev builds; it is compiled out of the deployable
+    /// WASM.
+    #[cfg(any(test, feature = "testutils"))]
     pub fn get_market_ttl(env: Env, market_id: u64) -> u32 {
         let key = DataKey::Market(market_id);
         if !env.storage().persistent().has(&key) {

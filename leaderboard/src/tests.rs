@@ -1,5 +1,5 @@
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Events}, Env, Symbol, TryFromVal, Val};
+use soroban_sdk::{testutils::{Address as _, Events}, Env, Symbol};
 
 fn setup() -> (
     Env,
@@ -789,9 +789,16 @@ fn test_add_pts_emits_leaderboard_updated() {
     let emitted = events.events();
     assert!(!emitted.is_empty(), "add_pts emitted no event");
     let soroban_sdk::xdr::ContractEventBody::V0(body) = &emitted.last().unwrap().body;
-    let topic0 = Val::try_from_val(&env, &body.topics[0]).unwrap();
-    let name = Symbol::try_from_val(&env, &topic0).unwrap();
-    assert_eq!(name, Symbol::new(&env, "leaderboard_updated"));
+    use soroban_sdk::xdr::ScVal;
+    match body.topics.as_slice().first() {
+        Some(ScVal::Symbol(name)) => {
+            assert_eq!(
+                Symbol::new(&env, core::str::from_utf8(name.as_slice()).unwrap()),
+                Symbol::new(&env, "leaderboard_updated")
+            );
+        }
+        other => panic!("first topic is not a symbol: {other:?}"),
+    }
 }
 
 #[test]
@@ -799,10 +806,10 @@ fn test_add_pts_always_rejected() {
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
     let rando = Address::generate(&env);
-    let result = client.add_pts(&rando, &user, &10_u64, &true);
+    let result = client.try_add_pts(&rando, &user, &10_u64, &true);
     assert!(result.is_err(), "add_pts should always return an error");
-    match result {
-        Err(LeaderboardError::UnauthorizedCaller) => {}
+    match result.unwrap_err() {
+        Ok(LeaderboardError::UnauthorizedCaller) => {}
         other => panic!("add_pts returned unexpected error: {:?}", other),
     }
 }

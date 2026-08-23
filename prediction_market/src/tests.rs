@@ -268,9 +268,10 @@ fn test_fee_full_2_percent_no_referrer() {
     fund_user(&t, &user, 200_0000000);
 
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
-    // Issue #78: only platform_fee is tracked in AccumulatedFees;
-    // referral fee stays in referral contract as surplus.
-    assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
+    // No registered referrer: the full 2% stays here as revenue — platform
+    // 1.5% + the 0.5% referral slice that is no longer shipped to an
+    // unvalidated "referrer".
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
 }
 
 // ── 6. Fee split with referrer ────────────────────────────────────────────────
@@ -299,7 +300,9 @@ fn test_fee_split_with_referrer() {
 
     assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
     assert_eq!(t.xlm.balance(&referrer), 5000000);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 8);
+    // Referral bonus points are queued; claim then assert.
+    t.leaderboard_client.claim_pending_rewards(&referrer);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 3);
 }
 
 // ── 7. Reject bet on expired market ──────────────────────────────────────────
@@ -496,9 +499,11 @@ fn test_cancel_market_claim_style_refund() {
     assert!(t.client.get_market(&id).cancelled);
 
     // Fees should be zeroed from AccumulatedFees since market is cancelled
-    // (fees are returned to bettors via cancel_refund)
+    // (fees are returned to bettors via cancel_refund). Only the retained
+    // no-referrer referral slices (0.5 + 0.25 XLM) survive — cancel reclaims
+    // at most the platform-derived share.
     let acc_fees_after_cancel = t.client.get_accumulated_fees();
-    assert_eq!(acc_fees_after_cancel, 0);
+    assert_eq!(acc_fees_after_cancel, 7_5000000);
 
     // Each bettor pulls their own gross refund
     let alice_refund = t.client.cancel_refund(&alice, &id);
@@ -961,7 +966,93 @@ fn test_referrer_bonus_points_per_bet() {
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     t.client.place_bet(&user, &id, &true, &50_0000000_i128);
 
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 11);
+    // 3 bonus points per referred bet are queued; claim then assert.
+    t.leaderboard_client.claim_pending_rewards(&referrer);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 6);
+}
+
+// ── 30b. Issue fix: place_bet must not pay an unregistered referrer ──────────
+//
+// The bettor's profile still names a referrer, but the referrer's own
+// registration is gone (archived TTL / bad migration / legacy wipe). The
+// referral fee must stay with the market instead of being transferred out
+// to an address that `credit()` would silently drop.
+
+fn wipe_referrer_registration(t: &TestSetup, referrer: &Address) {
+    t.env.as_contract(&t.referral_client.address, || {
+        let store = t.env.storage().persistent();
+        store.remove(&referral_registry::DataKey::Profile(referrer.clone()));
+        store.remove(&referral_registry::DataKey::Registered(referrer.clone()));
+        store.remove(&referral_registry::DataKey::DisplayName(referrer.clone()));
+        store.remove(&referral_registry::DataKey::Referrer(referrer.clone()));
+    });
+}
+
+#[test]
+fn test_unregistered_referrer_fee_routed_to_market() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    let no_ref: Option<Address> = None;
+    t.referral_client.register_referral(
+        &referrer,
+        &String::from_str(&t.env, "Referrer"),
+        &no_ref,
+    );
+    t.referral_client.register_referral(
+        &user,
+        &String::from_str(&t.env, "Fan"),
+        &Some(referrer.clone()),
+    );
+
+    // Simulate the referrer's registration vanishing after the fact.
+    wipe_referrer_registration(&t, &referrer);
+    assert!(!t.referral_client.is_registered_referrer(&referrer));
+    // The bettor still points at them — this is exactly the trap.
+    assert_eq!(t.referral_client.get_referrer(&user), Some(referrer.clone()));
+
+    let ref_xlm_before = t.xlm.balance(&referrer);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    // Full 2% fee stays with the market; nothing is shipped to the
+    // unregistered "referrer".
+    assert_eq!(t.client.get_accumulated_fees(), 2_0000000);
+    assert_eq!(t.client.get_market_fees(&id), 2_0000000);
+    assert_eq!(t.xlm.balance(&referrer), ref_xlm_before);
+}
+
+#[test]
+fn test_unregistered_referrer_cached_false_across_bets() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    let referrer = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    let no_ref: Option<Address> = None;
+    t.referral_client.register_referral(
+        &referrer,
+        &String::from_str(&t.env, "Referrer"),
+        &no_ref,
+    );
+    t.referral_client.register_referral(
+        &user,
+        &String::from_str(&t.env, "Fan"),
+        &Some(referrer.clone()),
+    );
+    wipe_referrer_registration(&t, &referrer);
+
+    let ref_xlm_before = t.xlm.balance(&referrer);
+    // Two bets: both must take the retained-fee path (the second via the
+    // cached `HasReferrer = false` lookup).
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&user, &id, &true, &50_0000000_i128);
+
+    assert_eq!(t.client.get_accumulated_fees(), 3_0000000); // 1.5 + 1.5 XLM
+    assert_eq!(t.xlm.balance(&referrer), ref_xlm_before);
 }
 
 // ── 31. Spam guard: TooManyBets ──────────────────────────────────────────────
@@ -1197,14 +1288,16 @@ fn test_empty_side_resolution_pool_to_fees() {
     // Only YES bets — no one bets NO
     t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
     let fees_before = t.client.get_accumulated_fees();
-    assert_eq!(fees_before, 1_5000000); // 1.5% platform fee (referral fee goes to surplus)
-    assert_eq!(t.client.get_market_fees(&id), 1_5000000);
+    // Alice has no registered referrer: platform 1.5 XLM + retained referral
+    // 0.5 XLM stay here as revenue.
+    assert_eq!(fees_before, 2_0000000);
+    assert_eq!(t.client.get_market_fees(&id), 2_0000000);
 
     // Advance past end_time and resolve NO (empty winning side)
     advance_time(&t.env, 3601);
     t.client.resolve_market(&t.admin, &id, &false); // total_no == 0
 
-    // Principal must NOT enter the fee pot. Only the 1.5 XLM platform fee remains.
+    // Principal must NOT enter the fee pot. Only the 2 XLM of genuine fees remain.
     let fees_after = t.client.get_accumulated_fees();
     assert_eq!(
         fees_after, fees_before,
@@ -1217,8 +1310,8 @@ fn test_empty_side_resolution_pool_to_fees() {
     t.client.add_fee_recipient(&t.admin, &treasury);
     let before = t.xlm.balance(&treasury);
     let withdrawn = withdraw_all_admin_fees(&t, &treasury);
-    assert_eq!(withdrawn, 1_5000000);
-    assert_eq!(t.xlm.balance(&treasury), before + 1_5000000);
+    assert_eq!(withdrawn, 2_0000000);
+    assert_eq!(t.xlm.balance(&treasury), before + 2_0000000);
     assert_eq!(t.client.get_accumulated_fees(), 0);
     assert_eq!(t.client.get_market_fees(&id), 0);
 
@@ -1243,14 +1336,16 @@ fn test_cancel_fees_zeroed_correctly() {
     fund_user(&t, &alice, 200_0000000);
     fund_user(&t, &bob, 200_0000000);
 
-    // Two bets accumulate fees (only platform_fee tracked; referral fee goes to surplus)
-    t.client.place_bet(&alice, &id, &true, &100_0000000_i128); // 1.5 XLM platform fee
-    t.client.place_bet(&bob, &id, &false, &100_0000000_i128); // 1.5 XLM platform fee
-    assert_eq!(t.client.get_accumulated_fees(), 3_0000000);
+    // Two bets accumulate fees (platform 1.5 XLM each + retained 0.5 XLM
+    // referral slice each — neither bettor has a registered referrer)
+    t.client.place_bet(&alice, &id, &true, &100_0000000_i128); // 2 XLM total fees
+    t.client.place_bet(&bob, &id, &false, &100_0000000_i128); // 2 XLM total fees
+    assert_eq!(t.client.get_accumulated_fees(), 4_0000000);
 
-    // Cancel zeroes out those fees
+    // Cancel reclaims at most the platform-derived share (3 XLM); the
+    // retained referral slices stay withdrawable revenue.
     t.client.cancel_market(&t.admin, &id);
-    assert_eq!(t.client.get_accumulated_fees(), 0);
+    assert_eq!(t.client.get_accumulated_fees(), 1_0000000);
 
     // Bettors get their gross back
     t.client.cancel_refund(&alice, &id);
@@ -1282,6 +1377,8 @@ fn test_e2e_full_inter_contract_flow() {
         &String::from_str(&t.env, "Alice"),
         &Some(referrer.clone()),
     );
+    // Welcome bonus (5 pts) is queued at registration — claim it out.
+    t.leaderboard_client.claim_pending_rewards(&alice);
     assert_eq!(t.leaderboard_client.get_points(&alice), 5);
     assert_eq!(t.token_client.balance(&alice), 1_0000000);
 
@@ -1299,18 +1396,19 @@ fn test_e2e_full_inter_contract_flow() {
         .place_bet(&alice, &market_id, &true, &100_0000000_i128);
     assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
     assert_eq!(t.xlm.balance(&referrer), 5000000);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 8);
+    // Referrer's 3 pts per referred bet are queued — claim then assert.
+    t.leaderboard_client.claim_pending_rewards(&referrer);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 3);
     // Alice's welcome bonus counts as activity: won(0) + lost(0) + bonus(1).
     assert_eq!(t.leaderboard_client.get_stats(&alice).total_bets, 1);
     assert_eq!(t.client.get_market(&market_id).total_yes, 98_0000000);
     assert_eq!(t.client.get_bet_gross(&market_id, &alice), 100_0000000);
 
-    // Bob bets NO 200 XLM — no referrer
+    // Bob bets NO 200 XLM — no referrer: platform 3 XLM + retained referral
+    // slice 1 XLM stay here as revenue.
     t.client
         .place_bet(&bob, &market_id, &false, &200_0000000_i128);
-    // Issue #78: only platform_fee tracked per bet; referral fee goes to surplus.
-    // Alice: 1.5M, Bob: 3M platform fee → total 4.5M
-    assert_eq!(t.client.get_accumulated_fees(), 4_5000000);
+    assert_eq!(t.client.get_accumulated_fees(), 5_5000000);
     // Bob never registered, so no bonus: total_bets = won(0) + lost(0) + bonus(0).
     assert_eq!(t.leaderboard_client.get_stats(&bob).total_bets, 0);
     assert_eq!(t.client.get_market(&market_id).total_no, 196_0000000);
@@ -1323,7 +1421,8 @@ fn test_e2e_full_inter_contract_flow() {
     assert_eq!(t.client.get_bet_gross(&market_id, &alice), 150_0000000);
     assert_eq!(t.client.get_market(&market_id).total_yes, 147_0000000);
     assert_eq!(t.client.get_market(&market_id).bet_count, 2);
-    assert_eq!(t.leaderboard_client.get_points(&referrer), 11);
+    t.leaderboard_client.claim_pending_rewards(&referrer);
+    assert_eq!(t.leaderboard_client.get_points(&referrer), 6);
 
     // Add a resolver and resolve via them
     let resolver = Address::generate(&t.env);
@@ -1372,8 +1471,10 @@ fn test_e2e_full_inter_contract_flow() {
     t.client
         .place_bet(&charlie, &market2, &true, &100_0000000_i128);
     t.client.cancel_market(&t.admin, &market2);
-    // AccumulatedFees from market2 should be zeroed
-    assert_eq!(t.client.get_accumulated_fees(), 0);
+    // Charlie has no registered referrer: his 0.5 XLM referral slice stays
+    // withdrawable revenue; cancel only reclaims the platform-derived share
+    // (1.5 XLM) from market2's ledger.
+    assert_eq!(t.client.get_accumulated_fees(), 5000000);
     // Charlie pulls their own refund (gross = 100 XLM)
     let refunded = t.client.cancel_refund(&charlie, &market2);
     assert_eq!(refunded, 100_0000000);
@@ -2112,10 +2213,18 @@ fn test_set_config_non_governor_rejected() {
 }
 
 fn last_event_name(env: &Env) -> Symbol {
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
     let events = env.events().all();
-    let last = events.get(events.len() - 1).unwrap();
-    let topic0: Val = last.1.get_unchecked(0);
-    Symbol::try_from_val(env, &topic0).unwrap()
+    let last = events.events().last().expect("no events emitted");
+    let topics = match &last.body {
+        ContractEventBody::V0(v0) => &v0.topics,
+    };
+    match topics.as_slice().first().expect("event without topics") {
+        ScVal::Symbol(name) => {
+            Symbol::new(env, core::str::from_utf8(name.as_slice()).unwrap())
+        }
+        other => panic!("first topic is not a symbol: {other:?}"),
+    }
 }
 
 #[test]
@@ -2171,17 +2280,19 @@ fn test_cancel_does_not_wipe_other_market_fees() {
     fund_user(&t, &alice, 200_0000000);
     fund_user(&t, &bob, 200_0000000);
 
-    t.client.place_bet(&alice, &id1, &true, &100_0000000_i128); // 1.5 XLM
-    t.client.place_bet(&bob, &id2, &true, &100_0000000_i128); // 1.5 XLM
-    assert_eq!(t.client.get_accumulated_fees(), 3_0000000);
-    assert_eq!(t.client.get_market_fees(&id1), 1_5000000);
-    assert_eq!(t.client.get_market_fees(&id2), 1_5000000);
+    t.client.place_bet(&alice, &id1, &true, &100_0000000_i128); // 2 XLM (no referrer)
+    t.client.place_bet(&bob, &id2, &true, &100_0000000_i128); // 2 XLM (no referrer)
+    assert_eq!(t.client.get_accumulated_fees(), 4_0000000);
+    assert_eq!(t.client.get_market_fees(&id1), 2_0000000);
+    assert_eq!(t.client.get_market_fees(&id2), 2_0000000);
 
     t.client.cancel_market(&t.admin, &id1);
 
-    assert_eq!(t.client.get_market_fees(&id1), 0);
-    assert_eq!(t.client.get_market_fees(&id2), 1_5000000);
-    assert_eq!(t.client.get_accumulated_fees(), 1_5000000);
+    // Cancel reclaims only the platform-derived share (1.5 of 2 XLM); the
+    // retained referral slice stays on id1's ledger and in AccumulatedFees.
+    assert_eq!(t.client.get_market_fees(&id1), 5000000);
+    assert_eq!(t.client.get_market_fees(&id2), 2_0000000);
+    assert_eq!(t.client.get_accumulated_fees(), 2_5000000);
 }
 
 #[test]
@@ -2191,9 +2302,9 @@ fn test_cancel_reclaims_pool_fees_not_inflated_ledger() {
     let alice = Address::generate(&t.env);
     fund_user(&t, &alice, 200_0000000);
     t.client.place_bet(&alice, &id, &true, &100_0000000_i128);
-    assert_eq!(t.client.get_market_fees(&id), 1_5000000);
+    assert_eq!(t.client.get_market_fees(&id), 2_0000000);
 
-    // Simulate an inflated per-market ledger (10 XLM recorded vs 1.5 earned).
+    // Simulate an inflated per-market ledger (10 XLM recorded vs 2 earned).
     t.env.as_contract(&t.client.address, || {
         t.env
             .storage()
@@ -2225,7 +2336,7 @@ fn test_withdraw_fees_cannot_take_empty_side_principal() {
     let treasury = Address::generate(&t.env);
     t.client.add_fee_recipient(&t.admin, &treasury);
     let withdrawn = withdraw_all_admin_fees(&t, &treasury);
-    assert_eq!(withdrawn, 1_5000000);
+    assert_eq!(withdrawn, 2_0000000);
 
     // Alice's 98 XLM net is still sitting in the contract for her to claim.
     let alice_before = t.xlm.balance(&alice);
@@ -2282,8 +2393,8 @@ fn test_migrate_fee_ledger_snapshots_legacy_balance() {
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     assert_eq!(t.client.get_legacy_fees(), legacy_amount);
-    assert_eq!(t.client.get_market_fees(&id), 1_5000000);
-    assert_eq!(t.client.get_accumulated_fees(), legacy_amount + 1_5000000);
+    assert_eq!(t.client.get_market_fees(&id), 2_0000000);
+    assert_eq!(t.client.get_accumulated_fees(), legacy_amount + 2_0000000);
 }
 
 #[test]
@@ -2297,7 +2408,7 @@ fn test_admin_withdraw_respects_cap() {
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     let fees = t.client.get_accumulated_fees();
-    assert_eq!(fees, 4_5000000);
+    assert_eq!(fees, 6_0000000); // 3 × (1.5 platform + 0.5 retained referral)
 
     let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
     let withdrawn = t.client.withdraw_fees(&t.admin, &t.admin);
@@ -2313,7 +2424,7 @@ fn test_two_step_withdraw_debits_market_ledger() {
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 200_0000000);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
-    assert_eq!(t.client.get_market_fees(&id), 1_5000000);
+    assert_eq!(t.client.get_market_fees(&id), 2_0000000);
 
     let recipient = Address::generate(&t.env);
     t.client.add_fee_recipient(&t.admin, &recipient);
