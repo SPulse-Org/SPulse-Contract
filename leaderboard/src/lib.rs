@@ -10,7 +10,7 @@ pub const MAX_TOP_PLAYERS: u32 = 50;
 /// Must be numerically greater than every valid in-list rank so an unranked
 /// player never sorts above a real position (issue #91).
 pub const UNRANKED_RANK: u32 = MAX_TOP_PLAYERS + 1;
-const MAX_PAGE_SIZE: u32 = 20;
+const MAX_PAGE_SIZE: u32 = MAX_TOP_PLAYERS;
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 
@@ -410,8 +410,14 @@ impl LeaderboardContract {
     /// No-op stub retained for ABI compatibility. total_bets is derived at read
     /// time, so a standalone "bet recorded" call does nothing.
     pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
+        // Historical contract (unchanged since the initial repo commit):
+        // this hook is an authenticated notification only. Lifetime bet
+        // counters are maintained exclusively by add_pts / reward /
+        // add_bonus_pts at settlement time, so recording a bet here would
+        // double-count activity.
         Self::require_not_paused(&env)?;
         Self::require_market_contract(&env, &caller)?;
+        caller.require_auth();
         Ok(())
     }
 
