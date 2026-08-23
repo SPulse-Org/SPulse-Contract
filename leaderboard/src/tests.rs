@@ -799,10 +799,31 @@ fn test_add_pts_always_rejected() {
     let (env, client, _admin, market, _referral) = setup();
     let user = Address::generate(&env);
     let rando = Address::generate(&env);
-    let result = client.add_pts(&rando, &user, &10_u64, &true);
-    assert!(result.is_err(), "add_pts should always return an error");
-    match result {
-        Err(LeaderboardError::UnauthorizedCaller) => {}
-        other => panic!("add_pts returned unexpected error: {:?}", other),
-    }
+    // Generated clients panic on error unless the `try_*` variant is used.
+    assert!(
+        client.try_add_pts(&rando, &user, &10_u64, &true).is_err(),
+        "add_pts from a non-market caller must be rejected"
+    );
+}
+
+// ── record_bet: authenticated market notification hook (no stats mutation) ────
+
+#[test]
+fn test_record_bet_accepts_market_caller() {
+    let (env, client, _admin, market, _referral) = setup();
+    let user = Address::generate(&env);
+    // Authenticated call from the registered market succeeds and is a no-op:
+    // lifetime counters are owned by add_pts / reward / add_bonus_pts.
+    client.record_bet(&market, &user);
+    assert_eq!(client.get_stats(&user).total_bets, 0);
+    assert_eq!(client.get_points(&user), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_record_bet_rejects_non_market_caller() {
+    let (env, client, _admin, _market, _referral) = setup();
+    let rando = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.record_bet(&rando, &user);
 }

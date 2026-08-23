@@ -3,7 +3,7 @@ use soroban_sdk::{
     contract, contractimpl,
     testutils::{storage::Persistent as _, Address as _, Events, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Val,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryIntoVal, Val,
 };
 
 use leaderboard::LeaderboardContract;
@@ -132,6 +132,22 @@ fn withdraw_all_admin_fees(t: &TestSetup, recipient: &Address) -> i128 {
         total += t.client.withdraw_fees(&t.admin, recipient);
     }
     total
+}
+
+/// Advance only the ledger sequence, leaving wall-clock time untouched.
+/// The rate-limit window is sequence-anchored (issue #56), so this is what
+/// actually expires it.
+fn advance_ledgers(env: &Env, n: u32) {
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 26,
+        sequence_number: env.ledger().sequence() + n,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 10_000_000,
+    });
 }
 
 fn rewind_time(env: &Env, secs: u64) {
@@ -986,7 +1002,7 @@ fn test_reject_too_many_bets() {
 #[test]
 fn test_market_creation_rate_limit_allows_up_to_max() {
     let t = setup();
-    // Should be able to create up to MAX_MARKETS_PER_HOUR (10) in the same window
+    // Should be able to create up to MAX_MARKETS_PER_WINDOW (10) in the same window
     for i in 0..10u32 {
         let _ = t.client.create_market(
             &t.admin,
@@ -1035,8 +1051,8 @@ fn test_market_creation_rate_limit_resets_after_window() {
             &(3600_u64 + i as u64),
         );
     }
-    // Advance past the 1-hour window
-    advance_time(&t.env, 3601);
+    // Advance past the rate-limit window (~720 ledgers = 1h)
+    advance_ledgers(&t.env, RATE_WINDOW_LEDGERS);
     // Should be able to create again
     let id = t.client.create_market(
         &t.admin,
@@ -1067,6 +1083,33 @@ fn test_market_creation_rate_limit_rejects_timestamp_regression() {
     t.client.create_market(
         &t.admin,
         &String::from_str(&t.env, "Over limit after rewind"),
+        &String::from_str(&t.env, "https://x.png"),
+        &Category::Sports,
+        &7200_u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_market_creation_rate_limit_not_reset_by_timestamp_jump() {
+    let t = setup();
+    for i in 0..10u32 {
+        let _ = t.client.create_market(
+            &t.admin,
+            &String::from_str(&t.env, "Market"),
+            &String::from_str(&t.env, "https://x.png"),
+            &Category::Crypto,
+            &(3600_u64 + i as u64),
+        );
+    }
+
+    // A huge forward jump in wall-clock time without the corresponding ledger
+    // progression must NOT expire the window: the limit is anchored to the
+    // monotonic ledger sequence, not to timestamps.
+    advance_time(&t.env, 86_400);
+    t.client.create_market(
+        &t.admin,
+        &String::from_str(&t.env, "Over limit after time jump"),
         &String::from_str(&t.env, "https://x.png"),
         &Category::Sports,
         &7200_u64,
@@ -1476,20 +1519,6 @@ fn test_single_winner_gets_whole_net_pool() {
 // ═══════════════════════════════════════════════════════════════════════════
 // SECURITY REGRESSION SUITE — issue #9 (persistent storage TTL)
 // ═══════════════════════════════════════════════════════════════════════════
-
-fn advance_ledgers(env: &Env, n: u32) {
-    let current_seq = env.ledger().sequence();
-    env.ledger().set(LedgerInfo {
-        timestamp: env.ledger().timestamp() + 1,
-        protocol_version: 26,
-        sequence_number: current_seq + n,
-        network_id: Default::default(),
-        base_reserve: 10,
-        min_temp_entry_ttl: 100,
-        min_persistent_entry_ttl: 100,
-        max_entry_ttl: 10_000_000,
-    });
-}
 
 // ── #9: claims/refunds keep recoverable storage alive (TTL re-bump) ──────────
 #[test]
@@ -2112,10 +2141,18 @@ fn test_set_config_non_governor_rejected() {
 }
 
 fn last_event_name(env: &Env) -> Symbol {
-    let events = env.events().all();
-    let last = events.get(events.len() - 1).unwrap();
-    let topic0: Val = last.1.get_unchecked(0);
-    Symbol::try_from_val(env, &topic0).unwrap()
+    let all = env.events().all();
+    let last = all.events().last().expect("no events emitted");
+    let topics = match &last.body {
+        soroban_sdk::xdr::ContractEventBody::V0(v0) => &v0.topics,
+    };
+    let topic0: Symbol = topics
+        .iter()
+        .next()
+        .expect("event has no topics")
+        .try_into_val(env)
+        .unwrap();
+    topic0
 }
 
 #[test]
