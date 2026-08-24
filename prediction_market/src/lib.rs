@@ -862,7 +862,7 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&bet_key, &new_entry);
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, TTL_HIGH, TTL_HIGH);
 
         // ── Bettor index (first bet only) ─────────────────────────────────
         if !is_increase {
@@ -1058,7 +1058,7 @@ impl PredictionMarketContract {
                         env.storage().persistent().set(&payout_key, &payout);
                         env.storage()
                             .persistent()
-                            .extend_ttl(&payout_key, TTL_BUMP, TTL_HIGH);
+                            .extend_ttl(&payout_key, CLAIM_WINDOW_TTL, TTL_HIGH);
                         payout_sum += payout;
                     }
                 }
@@ -1256,7 +1256,7 @@ impl PredictionMarketContract {
         // late to a cancelled market can still pull their refund.
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
@@ -1325,7 +1325,7 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&bet_key, &entry);
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
@@ -1736,10 +1736,12 @@ impl PredictionMarketContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
-            let bet_key = DataKey::Bet(market_id, user);
-            env.storage()
-                .persistent()
-                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            if payout > 0 {
+                let bet_key = DataKey::Bet(market_id, user);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            }
         }
         payout
     }

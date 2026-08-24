@@ -1911,6 +1911,157 @@ fn test_cancel_refund_emits_event_when_bet_expired() {
     assert_eq!(Symbol::try_from_val(&t.env, &topic0).unwrap(), Symbol::new(&t.env, "claim_window_expired"));
 }
 
+#[test]
+fn test_bet_expires_after_ledgers() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert!(ttl(&bet_key) >= TTL_HIGH);
+
+    advance_ledgers(&t.env, 7_500_000);
+
+    assert_eq!(ttl(&bet_key), 0);
+}
+
+#[test]
+fn test_get_bet_extends_ttl_when_expired() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    advance_ledgers(&t.env, 7_500_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert_eq!(ttl(&bet_key), 0);
+
+    t.client.get_bet(&id, &user);
+
+    assert!(ttl(&bet_key) > 0);
+}
+
+#[test]
+fn test_bump_ttl_extends_ttl_when_expired() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    advance_ledgers(&t.env, 7_500_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert_eq!(ttl(&bet_key), 0);
+
+    assert_eq!(t.client.bump_ttl(&id, &user), Ok(()));
+    assert!(ttl(&bet_key) > 0);
+}
+
+#[test]
+fn test_payout_expires_after_ledgers() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    let market_contract = t.client.address.clone();
+    let payout_key = DataKey::Payout(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert!(ttl(&payout_key) >= CLAIM_WINDOW_TTL);
+
+    advance_ledgers(&t.env, 3_000_000);
+
+    assert_eq!(ttl(&payout_key), 0);
+}
+
+#[test]
+fn test_get_payout_extends_ttl_when_expired() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    advance_ledgers(&t.env, 3_000_000);
+
+    let market_contract = t.client.address.clone();
+    let payout_key = DataKey::Payout(id, user.clone());
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert_eq!(ttl(&payout_key), 0);
+    assert_eq!(ttl(&bet_key), 0);
+
+    t.client.get_payout(&id, &user);
+
+    assert!(ttl(&payout_key) > 0);
+    assert!(ttl(&bet_key) > 0);
+}
+
+#[test]
+fn test_get_payout_does_not_extend_bet_ttl_when_zero() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    advance_ledgers(&t.env, 3_000_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    assert_eq!(ttl(&bet_key), 0);
+
+    // Loser's payout key does not exist, so get_payout returns 0 and does not touch BetEntry.
+    let loser = Address::generate(&t.env);
+    let loser_bet_key = DataKey::Bet(id, loser.clone());
+    let loser_ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    let loser_before = loser_ttl(&loser_bet_key);
+
+    t.client.get_payout(&id, &loser);
+
+    assert_eq!(loser_ttl(&loser_bet_key), loser_before);
+}
+
 // ── Cross-contract interface versioning (issue #84) ───────────────────────────
 
 // Stands in for a referral_registry/leaderboard deployment upgraded to an
