@@ -20,6 +20,7 @@ use soroban_sdk::{
 // withdraw_cancelled (admin)                  caller
 // config_changed     (admin)                  Config
 // paused / unpaused  (admin)                  ()
+// claim_window_expired (user, id)             ()
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -1225,11 +1226,20 @@ impl PredictionMarketContract {
 
         // OPT: read BetEntry (which now contains gross) — was a separate BetGross key
         let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env
+        let mut entry: BetEntry = match env
             .storage()
             .persistent()
             .get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
+        {
+            Some(e) => e,
+            None => {
+                env.events().publish(
+                    (Symbol::new(&env, "claim_window_expired"), user.clone(), market_id),
+                    (),
+                );
+                return Err(MarketError::NoBetFound);
+            }
+        };
 
         if entry.gross == 0 {
             return Err(MarketError::NoBetFound);
@@ -1282,11 +1292,20 @@ impl PredictionMarketContract {
         Self::enforce_zero_side_claim_window(&env, market_id)?;
 
         let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env
+        let mut entry: BetEntry = match env
             .storage()
             .persistent()
             .get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
+        {
+            Some(e) => e,
+            None => {
+                env.events().publish(
+                    (Symbol::new(&env, "claim_window_expired"), user.clone(), market_id),
+                    (),
+                );
+                return Err(MarketError::NoBetFound);
+            }
+        };
 
         if entry.claimed {
             return Err(MarketError::AlreadyClaimed);
@@ -1526,16 +1545,29 @@ impl PredictionMarketContract {
     // ── View Functions ────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, MarketError> {
-        Self::load_market(&env, market_id)
+        let mkt_key = DataKey::Market(market_id);
+        let market = env
+            .storage()
+            .persistent()
+            .get(&mkt_key)
+            .ok_or(MarketError::MarketNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Ok(market)
     }
 
     // OPT: returns Bet (ABI-compatible) derived from BetEntry
     pub fn get_bet(env: Env, market_id: u64, user: Address) -> Result<Bet, MarketError> {
+        let bet_key = DataKey::Bet(market_id, user.clone());
         let e: BetEntry = env
             .storage()
             .persistent()
-            .get(&DataKey::Bet(market_id, user))
+            .get(&bet_key)
             .ok_or(MarketError::NoBetFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
         Ok(Bet {
             amount: e.net,
             is_yes: e.is_yes,
@@ -1661,6 +1693,22 @@ impl PredictionMarketContract {
         Ok(bumped)
     }
 
+    pub fn bump_ttl(env: Env, market_id: u64, user: Address) -> Result<(), MarketError> {
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        if env.storage().persistent().has(&bet_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            Ok(())
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+            Err(MarketError::NoBetFound)
+        }
+    }
+
     pub fn is_fee_recipient(env: Env, recipient: Address) -> bool {
         env.storage()
             .persistent()
@@ -1669,32 +1717,57 @@ impl PredictionMarketContract {
     }
 
     pub fn get_pending_withdrawal(env: Env, caller: Address) -> Option<WithdrawalRequest> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::PendingWithdrawal(caller))
+        let key = DataKey::PendingWithdrawal(caller.clone());
+        let req = env.storage().persistent().get(&key);
+        if req.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        }
+        req
     }
 
     pub fn get_payout(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payout(market_id, user))
-            .unwrap_or(0)
+        let key = DataKey::Payout(market_id, user.clone());
+        let payout: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        }
+        payout
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
-        env.storage()
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        let count = env
+            .storage()
             .persistent()
-            .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))
+            .get::<DataKey, BetEntry>(&bet_key)
             .map(|e| e.count)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&bet_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+        }
+        count
     }
 
     pub fn get_bet_gross(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        let gross = env
+            .storage()
             .persistent()
-            .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))
+            .get::<DataKey, BetEntry>(&bet_key)
             .map(|e| e.gross)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&bet_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+        }
+        gross
     }
 
     // ── Internal Helpers ──────────────────────────────────────────────────
