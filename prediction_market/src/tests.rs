@@ -1772,6 +1772,58 @@ fn test_get_pending_withdrawal_rebumps_ttl() {
 }
 
 #[test]
+fn test_get_payout_rebumps_bet_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    let before = ttl(&bet_key);
+
+    t.client.get_payout(&id, &user);
+
+    assert!(ttl(&bet_key) > before);
+}
+
+#[test]
+fn test_resolve_market_sets_claim_window_ttl() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 200_0000000);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+
+    advance_ledgers(&t.env, 6_000_000);
+
+    let market_contract = t.client.address.clone();
+    let bet_key = DataKey::Bet(id, user.clone());
+    let payout_key = DataKey::Payout(id, user.clone());
+    let ttl = |key: &DataKey| -> u32 {
+        t.env
+            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+    };
+    let bet_before = ttl(&bet_key);
+    let payout_before = ttl(&payout_key);
+
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+
+    assert!(ttl(&bet_key) > bet_before);
+    assert!(ttl(&payout_key) > payout_before);
+}
+
+#[test]
 fn test_bump_ttl_extends_bet_ttl() {
     let t = setup();
     let id = create_test_market(&t);

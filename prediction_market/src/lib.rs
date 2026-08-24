@@ -58,6 +58,8 @@ const DISPUTE_WINDOW_SECS: u64 = 604_800; // 7 days
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 const MAX_TTL_REFRESH_PAGE: u32 = 20;
+// Claim window: after resolution, users have 30 days to claim winnings.
+const CLAIM_WINDOW_TTL: u32 = 2_592_000; // ~30 days in ledgers
 
 // Issue #84: bump whenever a function signature, argument order, or return
 // type that a caller relies on changes.
@@ -1327,7 +1329,7 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
-        Self::bump_if_present(&env, &DataKey::Payout(market_id, user.clone()));
+        Self::bump_if_present(&env, &DataKey::Payout(market_id, user.clone()), None);
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         let this = env.current_contract_address();
@@ -1734,6 +1736,10 @@ impl PredictionMarketContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+            let bet_key = DataKey::Bet(market_id, user);
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
         }
         payout
     }
@@ -1966,11 +1972,12 @@ impl PredictionMarketContract {
             .ok_or(MarketError::MarketNotFound)
     }
 
-    fn bump_if_present(env: &Env, key: &DataKey) {
+    fn bump_if_present(env: &Env, key: &DataKey, ttl: Option<u32>) {
         if env.storage().persistent().has(key) {
+            let ttl = ttl.unwrap_or(TTL_BUMP);
             env.storage()
                 .persistent()
-                .extend_ttl(key, TTL_BUMP, TTL_HIGH);
+                .extend_ttl(key, ttl, TTL_HIGH);
         }
     }
 
@@ -1981,14 +1988,14 @@ impl PredictionMarketContract {
         if !env.storage().persistent().has(&mkt_key) {
             return Err(MarketError::MarketNotFound);
         }
-        Self::bump_if_present(env, &mkt_key);
+        Self::bump_if_present(env, &mkt_key, None);
 
         let bettors: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::BettorCount(market_id))
             .unwrap_or(0);
-        Self::bump_if_present(env, &DataKey::BettorCount(market_id));
+        Self::bump_if_present(env, &DataKey::BettorCount(market_id), None);
         for i in 0..bettors {
             let slot_key = DataKey::BettorAt(market_id, i);
             if let Some(addr) = env
@@ -1996,13 +2003,13 @@ impl PredictionMarketContract {
                 .persistent()
                 .get::<DataKey, Address>(&slot_key)
             {
-                Self::bump_if_present(env, &slot_key);
-                Self::bump_if_present(env, &DataKey::Bet(market_id, addr.clone()));
-                Self::bump_if_present(env, &DataKey::Payout(market_id, addr));
+                Self::bump_if_present(env, &slot_key, None);
+                Self::bump_if_present(env, &DataKey::Bet(market_id, addr.clone()), Some(CLAIM_WINDOW_TTL));
+                Self::bump_if_present(env, &DataKey::Payout(market_id, addr), Some(CLAIM_WINDOW_TTL));
             }
         }
-        Self::bump_if_present(env, &DataKey::MarketFees(market_id));
-        Self::bump_if_present(env, &DataKey::ForfeitedPool(market_id));
+        Self::bump_if_present(env, &DataKey::MarketFees(market_id), None);
+        Self::bump_if_present(env, &DataKey::ForfeitedPool(market_id), None);
         env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(bettors)
     }
