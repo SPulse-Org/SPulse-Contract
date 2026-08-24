@@ -1,5 +1,8 @@
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Events}, Env, Symbol, TryFromVal, Val};
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    Env, Symbol, TryFromVal, Val,
+};
 
 fn setup() -> (
     Env,
@@ -750,7 +753,9 @@ fn test_eviction_clears_reverse_mapping() {
     // Displaced player: unranked and no lingering reverse mapping.
     assert_eq!(client.get_rank(&weakest), UNRANKED_RANK);
     let still_mapped = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&DataKey::TopPlayerSlot(weakest.clone()))
+        env.storage()
+            .persistent()
+            .has(&DataKey::TopPlayerSlot(weakest.clone()))
     });
     assert!(!still_mapped);
 }
@@ -795,14 +800,105 @@ fn test_add_pts_emits_leaderboard_updated() {
 }
 
 #[test]
-fn test_add_pts_always_rejected() {
-    let (env, client, _admin, market, _referral) = setup();
+fn test_add_pts_unauthorized_caller_rejected() {
+    let (env, client, _admin, _market, _referral) = setup();
     let user = Address::generate(&env);
     let rando = Address::generate(&env);
-    let result = client.add_pts(&rando, &user, &10_u64, &true);
-    assert!(result.is_err(), "add_pts should always return an error");
-    match result {
-        Err(LeaderboardError::UnauthorizedCaller) => {}
-        other => panic!("add_pts returned unexpected error: {:?}", other),
+    let result = client.try_add_pts(&rando, &user, &10_u64, &true);
+    assert_eq!(result, Err(Ok(LeaderboardError::UnauthorizedCaller)));
+}
+
+// ── Issue #159: get_rank returns UNRANKED_RANK (51) for unranked players ──────
+
+#[test]
+fn test_issue_159_unranked_query_returns_unranked_rank_sentinel_never_zero() {
+    let (env, client, _admin, _market, _referral) = setup();
+    let stranger = Address::generate(&env);
+
+    // Unranked address must return UNRANKED_RANK (51), never 0.
+    let rank = client.get_rank(&stranger);
+    assert_eq!(rank, UNRANKED_RANK);
+    assert_eq!(rank, 51);
+    assert!(rank > MAX_TOP_PLAYERS);
+    assert_ne!(rank, 0);
+}
+
+#[test]
+fn test_issue_159_reproduction_comparison_with_first_player() {
+    let (env, client, _admin, market, _referral) = setup();
+    let first_player = Address::generate(&env);
+    let unranked_player = Address::generate(&env);
+
+    client.add_pts(&market, &first_player, &500_u64, &true);
+
+    let top_players = client.get_top_players(&0, &1);
+    assert_eq!(top_players.len(), 1);
+    assert_eq!(top_players.get(0).unwrap().address, first_player);
+
+    let first_rank = client.get_rank(&first_player);
+    let unranked_rank = client.get_rank(&unranked_player);
+
+    assert_eq!(first_rank, 1);
+    assert_eq!(unranked_rank, UNRANKED_RANK);
+    // Crucial fix: unranked player (51) must sort behind rank 1, never ahead (which 0 did).
+    assert!(unranked_rank > first_rank);
+}
+
+#[test]
+fn test_issue_159_sorting_mixed_ranked_and_unranked_players() {
+    let (env, client, _admin, market, _referral) = setup();
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+    let unranked1 = Address::generate(&env);
+    let unranked2 = Address::generate(&env);
+
+    client.add_pts(&market, &p1, &300_u64, &true);
+    client.add_pts(&market, &p2, &200_u64, &true);
+    client.add_pts(&market, &p3, &100_u64, &true);
+
+    let mut player_ranks = [
+        (unranked1.clone(), client.get_rank(&unranked1)),
+        (p2.clone(), client.get_rank(&p2)),
+        (unranked2.clone(), client.get_rank(&unranked2)),
+        (p1.clone(), client.get_rank(&p1)),
+        (p3.clone(), client.get_rank(&p3)),
+    ];
+
+    // Sort ascending by rank
+    player_ranks.sort_by_key(|k| k.1);
+
+    assert_eq!(player_ranks[0].0, p1);
+    assert_eq!(player_ranks[0].1, 1);
+    assert_eq!(player_ranks[1].0, p2);
+    assert_eq!(player_ranks[1].1, 2);
+    assert_eq!(player_ranks[2].0, p3);
+    assert_eq!(player_ranks[2].1, 3);
+    assert_eq!(player_ranks[3].1, UNRANKED_RANK);
+    assert_eq!(player_ranks[4].1, UNRANKED_RANK);
+}
+
+#[test]
+fn test_issue_159_evicted_player_transitions_to_unranked_rank() {
+    let (env, client, _admin, market, _referral) = setup();
+    let mut players = Vec::new(&env);
+
+    // Fill top 50
+    for i in 1u64..=50 {
+        let u = Address::generate(&env);
+        client.add_pts(&market, &u, &(100 + i), &true);
+        players.push_back(u);
     }
+    assert_eq!(client.get_top_player_count(), 50);
+
+    let weakest = players.get(0).unwrap();
+    assert_eq!(client.get_rank(&weakest), 50);
+
+    // Evict weakest with a higher scoring newcomer
+    let newcomer = Address::generate(&env);
+    client.add_pts(&market, &newcomer, &1000_u64, &true);
+
+    assert_eq!(client.get_rank(&newcomer), 1);
+    assert_eq!(client.get_rank(&weakest), UNRANKED_RANK);
+    assert_ne!(client.get_rank(&weakest), 0);
 }

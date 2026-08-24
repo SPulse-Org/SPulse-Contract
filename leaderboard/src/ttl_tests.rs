@@ -156,14 +156,15 @@ fn test_min_points_and_min_slot_survive_ttl_refresh_cycle() {
         client.get_min_points() >= weakest,
         "min cache regressed after eviction"
     );
-    let top = client.get_top_players(&0_u32, &MAX_TOP_PLAYERS);
+    let top = client.get_top_players(&0_u32, &1);
     assert_eq!(
         top.get(0).unwrap().address,
         newcomer,
         "a fresh score must lead a list of decayed incumbents"
     );
+    let bottom = client.get_top_players(&(MAX_TOP_PLAYERS - 1), &1);
     assert_eq!(
-        top.get(MAX_TOP_PLAYERS - 1).unwrap().points,
+        bottom.get(0).unwrap().points,
         client.get_min_points(),
         "min cache must agree with the weakest ranked entry"
     );
@@ -289,7 +290,9 @@ fn test_refresh_player_ttl_rebumps_stats() {
 
     let ttl = || {
         env.as_contract(&client.address, || {
-            env.storage().persistent().get_ttl(&DataKey::Stats(user.clone()))
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Stats(user.clone()))
         })
     };
     assert!(ttl() >= TTL_BUMP);

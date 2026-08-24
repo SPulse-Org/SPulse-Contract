@@ -1497,6 +1497,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1509,14 +1517,6 @@
                     },
                     "val": {
                       "u64": "100"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1557,6 +1557,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1569,14 +1577,6 @@
                     },
                     "val": {
                       "u64": "101"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1617,6 +1617,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1629,14 +1637,6 @@
                     },
                     "val": {
                       "u64": "102"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1677,6 +1677,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1689,14 +1697,6 @@
                     },
                     "val": {
                       "u64": "103"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1737,6 +1737,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1749,14 +1757,6 @@
                     },
                     "val": {
                       "u64": "104"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1797,6 +1797,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1809,14 +1817,6 @@
                     },
                     "val": {
                       "u64": "105"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1857,6 +1857,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1869,14 +1877,6 @@
                     },
                     "val": {
                       "u64": "106"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1917,6 +1917,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1929,14 +1937,6 @@
                     },
                     "val": {
                       "u64": "107"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -1977,6 +1977,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -1989,14 +1997,6 @@
                     },
                     "val": {
                       "u64": "108"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2037,6 +2037,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2049,14 +2057,6 @@
                     },
                     "val": {
                       "u64": "109"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2097,6 +2097,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2109,14 +2117,6 @@
                     },
                     "val": {
                       "u64": "110"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2157,6 +2157,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2169,14 +2177,6 @@
                     },
                     "val": {
                       "u64": "111"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2217,6 +2217,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2229,14 +2237,6 @@
                     },
                     "val": {
                       "u64": "112"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2277,6 +2277,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2289,14 +2297,6 @@
                     },
                     "val": {
                       "u64": "113"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2337,6 +2337,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2349,14 +2357,6 @@
                     },
                     "val": {
                       "u64": "114"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2397,6 +2397,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2409,14 +2417,6 @@
                     },
                     "val": {
                       "u64": "115"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2457,6 +2457,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2469,14 +2477,6 @@
                     },
                     "val": {
                       "u64": "116"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2517,6 +2517,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2529,14 +2537,6 @@
                     },
                     "val": {
                       "u64": "117"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2577,6 +2577,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2589,14 +2597,6 @@
                     },
                     "val": {
                       "u64": "118"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2637,6 +2637,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2649,14 +2657,6 @@
                     },
                     "val": {
                       "u64": "119"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2697,6 +2697,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2709,14 +2717,6 @@
                     },
                     "val": {
                       "u64": "120"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2757,6 +2757,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2769,14 +2777,6 @@
                     },
                     "val": {
                       "u64": "121"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2817,6 +2817,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2829,14 +2837,6 @@
                     },
                     "val": {
                       "u64": "122"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2877,6 +2877,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2889,14 +2897,6 @@
                     },
                     "val": {
                       "u64": "123"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2937,6 +2937,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -2949,14 +2957,6 @@
                     },
                     "val": {
                       "u64": "124"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -2997,6 +2997,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3009,14 +3017,6 @@
                     },
                     "val": {
                       "u64": "125"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3057,6 +3057,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3069,14 +3077,6 @@
                     },
                     "val": {
                       "u64": "126"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3117,6 +3117,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3129,14 +3137,6 @@
                     },
                     "val": {
                       "u64": "127"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3177,6 +3177,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3189,14 +3197,6 @@
                     },
                     "val": {
                       "u64": "128"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3237,6 +3237,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3249,14 +3257,6 @@
                     },
                     "val": {
                       "u64": "129"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3297,6 +3297,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3309,14 +3317,6 @@
                     },
                     "val": {
                       "u64": "130"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3357,6 +3357,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3369,14 +3377,6 @@
                     },
                     "val": {
                       "u64": "131"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3417,6 +3417,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3429,14 +3437,6 @@
                     },
                     "val": {
                       "u64": "132"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3477,6 +3477,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3489,14 +3497,6 @@
                     },
                     "val": {
                       "u64": "133"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3537,6 +3537,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3549,14 +3557,6 @@
                     },
                     "val": {
                       "u64": "134"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3597,6 +3597,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3609,14 +3617,6 @@
                     },
                     "val": {
                       "u64": "135"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3657,6 +3657,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3669,14 +3677,6 @@
                     },
                     "val": {
                       "u64": "136"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3717,6 +3717,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3729,14 +3737,6 @@
                     },
                     "val": {
                       "u64": "137"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3777,6 +3777,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3789,14 +3797,6 @@
                     },
                     "val": {
                       "u64": "138"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3837,6 +3837,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3849,14 +3857,6 @@
                     },
                     "val": {
                       "u64": "139"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3897,6 +3897,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3909,14 +3917,6 @@
                     },
                     "val": {
                       "u64": "140"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -3957,6 +3957,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -3969,14 +3977,6 @@
                     },
                     "val": {
                       "u64": "141"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4017,6 +4017,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4029,14 +4037,6 @@
                     },
                     "val": {
                       "u64": "142"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4077,6 +4077,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4089,14 +4097,6 @@
                     },
                     "val": {
                       "u64": "143"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4137,6 +4137,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4149,14 +4157,6 @@
                     },
                     "val": {
                       "u64": "144"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4197,6 +4197,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4209,14 +4217,6 @@
                     },
                     "val": {
                       "u64": "145"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4257,6 +4257,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4269,14 +4277,6 @@
                     },
                     "val": {
                       "u64": "146"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4317,6 +4317,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4329,14 +4337,6 @@
                     },
                     "val": {
                       "u64": "147"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4377,6 +4377,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4389,14 +4397,6 @@
                     },
                     "val": {
                       "u64": "148"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4437,6 +4437,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4449,14 +4457,6 @@
                     },
                     "val": {
                       "u64": "149"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -4497,6 +4497,14 @@
                 "map": [
                   {
                     "key": {
+                      "symbol": "bonus_bets"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "lost_bets"
                     },
                     "val": {
@@ -4509,14 +4517,6 @@
                     },
                     "val": {
                       "u64": "100"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "total_bets"
-                    },
-                    "val": {
-                      "u32": 1
                     }
                   },
                   {
@@ -5961,7 +5961,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "49"
+                      "u64": "8"
                     }
                   }
                 ]
@@ -6021,7 +6021,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "48"
+                      "u64": "9"
                     }
                   }
                 ]
@@ -6081,7 +6081,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "47"
+                      "u64": "10"
                     }
                   }
                 ]
@@ -6141,7 +6141,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "46"
+                      "u64": "11"
                     }
                   }
                 ]
@@ -6201,7 +6201,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "45"
+                      "u64": "12"
                     }
                   }
                 ]
@@ -6261,7 +6261,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "44"
+                      "u64": "13"
                     }
                   }
                 ]
@@ -6321,7 +6321,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "43"
+                      "u64": "14"
                     }
                   }
                 ]
@@ -6381,7 +6381,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "42"
+                      "u64": "15"
                     }
                   }
                 ]
@@ -6441,7 +6441,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "41"
+                      "u64": "16"
                     }
                   }
                 ]
@@ -6501,7 +6501,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "40"
+                      "u64": "17"
                     }
                   }
                 ]
@@ -6561,7 +6561,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "39"
+                      "u64": "18"
                     }
                   }
                 ]
@@ -6621,7 +6621,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "38"
+                      "u64": "19"
                     }
                   }
                 ]
@@ -6681,7 +6681,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "37"
+                      "u64": "20"
                     }
                   }
                 ]
@@ -6741,7 +6741,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "36"
+                      "u64": "21"
                     }
                   }
                 ]
@@ -6801,7 +6801,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "35"
+                      "u64": "22"
                     }
                   }
                 ]
@@ -6861,7 +6861,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "34"
+                      "u64": "23"
                     }
                   }
                 ]
@@ -6921,7 +6921,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "33"
+                      "u64": "24"
                     }
                   }
                 ]
@@ -6981,7 +6981,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "32"
+                      "u64": "25"
                     }
                   }
                 ]
@@ -7041,7 +7041,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "31"
+                      "u64": "26"
                     }
                   }
                 ]
@@ -7101,7 +7101,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "30"
+                      "u64": "27"
                     }
                   }
                 ]
@@ -7161,7 +7161,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "29"
+                      "u64": "28"
                     }
                   }
                 ]
@@ -7221,7 +7221,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "28"
+                      "u64": "29"
                     }
                   }
                 ]
@@ -7281,7 +7281,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "27"
+                      "u64": "30"
                     }
                   }
                 ]
@@ -7341,7 +7341,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "26"
+                      "u64": "31"
                     }
                   }
                 ]
@@ -7401,7 +7401,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "25"
+                      "u64": "32"
                     }
                   }
                 ]
@@ -7461,7 +7461,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "24"
+                      "u64": "33"
                     }
                   }
                 ]
@@ -7521,7 +7521,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "23"
+                      "u64": "34"
                     }
                   }
                 ]
@@ -7581,7 +7581,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "22"
+                      "u64": "35"
                     }
                   }
                 ]
@@ -7641,7 +7641,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "21"
+                      "u64": "36"
                     }
                   }
                 ]
@@ -7701,7 +7701,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "20"
+                      "u64": "37"
                     }
                   }
                 ]
@@ -7761,7 +7761,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "19"
+                      "u64": "38"
                     }
                   }
                 ]
@@ -7821,7 +7821,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "18"
+                      "u64": "39"
                     }
                   }
                 ]
@@ -7881,7 +7881,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "17"
+                      "u64": "40"
                     }
                   }
                 ]
@@ -7941,7 +7941,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "16"
+                      "u64": "41"
                     }
                   }
                 ]
@@ -8001,7 +8001,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "15"
+                      "u64": "42"
                     }
                   }
                 ]
@@ -8061,7 +8061,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "14"
+                      "u64": "43"
                     }
                   }
                 ]
@@ -8121,7 +8121,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "13"
+                      "u64": "44"
                     }
                   }
                 ]
@@ -8181,7 +8181,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "12"
+                      "u64": "45"
                     }
                   }
                 ]
@@ -8241,7 +8241,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "11"
+                      "u64": "46"
                     }
                   }
                 ]
@@ -8301,7 +8301,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "10"
+                      "u64": "47"
                     }
                   }
                 ]
@@ -8361,7 +8361,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "9"
+                      "u64": "48"
                     }
                   }
                 ]
@@ -8421,7 +8421,7 @@
                       "symbol": "seq"
                     },
                     "val": {
-                      "u64": "8"
+                      "u64": "49"
                     }
                   }
                 ]
