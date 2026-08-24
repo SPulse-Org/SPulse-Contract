@@ -397,14 +397,18 @@ fn test_increase_position_same_side() {
 // ── 12. Reject opposite-side bet ─────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")]
-fn test_reject_opposite_side_bet() {
+fn test_switch_opposite_side_bet_moves_pool() {
     let t = setup();
     let id = create_test_market(&t);
     let user = Address::generate(&t.env);
     fund_user(&t, &user, 500_0000000);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
     t.client.place_bet(&user, &id, &false, &50_0000000_i128);
+
+    let market = t.client.get_market(&id);
+    assert_eq!(market.total_yes, 0);
+    assert_eq!(market.total_no, 147_0000000);
+    assert_eq!(t.client.get_user_bet_count(&id, &user), 2);
 }
 
 // ── 13. Resolve market ───────────────────────────────────────────────────────
@@ -1550,6 +1554,109 @@ fn test_cancel_refund_rebumps_ttl_entries() {
     assert!(ttl(&market_key) > market_before);
 }
 
+#[test]
+fn test_switch_yes_to_no_claims_no_position() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&user, &id, &false, &100_0000000_i128);
+    let market = t.client.get_market(&id);
+    assert_eq!(market.total_yes, 0);
+    assert_eq!(market.total_no, 196_0000000);
+
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &false);
+    let before_claim = t.xlm.balance(&user);
+    t.client.claim(&user, &id);
+    assert_eq!(t.xlm.balance(&user) - before_claim, 196_0000000);
+}
+
+#[test]
+fn test_switch_back_to_yes_claims_moved_position() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&user, &id, &false, &100_0000000_i128);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    let market = t.client.get_market(&id);
+    assert_eq!(market.total_yes, 294_0000000);
+    assert_eq!(market.total_no, 0);
+    assert_eq!(t.client.get_user_bet_count(&id, &user), 3);
+
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id, &true);
+    let before_claim = t.xlm.balance(&user);
+    t.client.claim(&user, &id);
+    assert_eq!(t.xlm.balance(&user) - before_claim, 294_0000000);
+}
+
+#[test]
+fn test_switch_yes_to_no_cancel_refunds_full_gross() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 500_0000000);
+    let before = t.xlm.balance(&user);
+
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+    t.client.place_bet(&user, &id, &false, &100_0000000_i128);
+    t.client.cancel_market(&t.admin, &id);
+
+    assert_eq!(t.client.cancel_refund(&user, &id), 200_0000000);
+    assert_eq!(t.xlm.balance(&user), before);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_repeated_switches_respect_bet_cap() {
+    let t = setup();
+    let id = create_test_market(&t);
+    let user = Address::generate(&t.env);
+    fund_user(&t, &user, 3_000_0000000);
+
+    for i in 0..MAX_BETS_PER_USER {
+        t.client
+            .place_bet(&user, &id, &(i % 2 == 0), &100_0000000_i128);
+    }
+    assert_eq!(t.client.get_user_bet_count(&id, &user), MAX_BETS_PER_USER);
+    t.client.place_bet(&user, &id, &true, &100_0000000_i128);
+}
+
+#[test]
+fn test_no_switch_payout_and_refund_math_is_unchanged() {
+    let t = setup();
+    let winner = Address::generate(&t.env);
+    let loser = Address::generate(&t.env);
+    fund_user(&t, &winner, 500_0000000);
+    fund_user(&t, &loser, 200_0000000);
+
+    let resolved_id = create_test_market(&t);
+    t.client
+        .place_bet(&winner, &resolved_id, &true, &100_0000000_i128);
+    t.client
+        .place_bet(&loser, &resolved_id, &false, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &resolved_id, &true);
+    let before_claim = t.xlm.balance(&winner);
+    t.client.claim(&winner, &resolved_id);
+    assert_eq!(t.xlm.balance(&winner) - before_claim, 196_0000000);
+
+    let cancelled_id = create_test_market(&t);
+    let before_refund = t.xlm.balance(&winner);
+    t.client
+        .place_bet(&winner, &cancelled_id, &true, &100_0000000_i128);
+    t.client.cancel_market(&t.admin, &cancelled_id);
+    assert_eq!(
+        t.client.cancel_refund(&winner, &cancelled_id),
+        100_0000000
+    );
+    assert_eq!(t.xlm.balance(&winner), before_refund);
 // ── #54: permissionless refresh + per-market expiry tracking + migration ─────
 
 #[test]
