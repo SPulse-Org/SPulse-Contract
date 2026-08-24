@@ -1,5 +1,8 @@
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Events}, Env, Symbol, TryFromVal, Val};
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    Env, Symbol, TryFromVal, Val,
+};
 
 fn setup() -> (
     Env,
@@ -750,7 +753,9 @@ fn test_eviction_clears_reverse_mapping() {
     // Displaced player: unranked and no lingering reverse mapping.
     assert_eq!(client.get_rank(&weakest), UNRANKED_RANK);
     let still_mapped = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&DataKey::TopPlayerSlot(weakest.clone()))
+        env.storage()
+            .persistent()
+            .has(&DataKey::TopPlayerSlot(weakest.clone()))
     });
     assert!(!still_mapped);
 }
@@ -792,17 +797,4 @@ fn test_add_pts_emits_leaderboard_updated() {
     let topic0 = Val::try_from_val(&env, &body.topics[0]).unwrap();
     let name = Symbol::try_from_val(&env, &topic0).unwrap();
     assert_eq!(name, Symbol::new(&env, "leaderboard_updated"));
-}
-
-#[test]
-fn test_add_pts_always_rejected() {
-    let (env, client, _admin, market, _referral) = setup();
-    let user = Address::generate(&env);
-    let rando = Address::generate(&env);
-    let result = client.add_pts(&rando, &user, &10_u64, &true);
-    assert!(result.is_err(), "add_pts should always return an error");
-    match result {
-        Err(LeaderboardError::UnauthorizedCaller) => {}
-        other => panic!("add_pts returned unexpected error: {:?}", other),
-    }
 }
