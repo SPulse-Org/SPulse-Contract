@@ -1,13 +1,27 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol,
 };
 
 // Issue #84: bump whenever a function signature, argument order, or return
 // type that a caller relies on changes, so a caller pinning this version can
 // detect an incompatible upgrade before invoking.
 pub const INTERFACE_VERSION: u32 = 1;
+
+// Issue #97: every entry this contract writes lives in storage the ledger
+// deletes once its TTL runs out. A `Balance` entry that expires takes the
+// holder's tokens with it while `TotalSupply` keeps counting them, breaking
+// the token's core invariant `total_supply == sum(balances)` and losing user
+// funds permanently. The policy here is therefore: *the operation that writes
+// a key also extends that key's TTL* — no exceptions, so no entry can rot
+// just because its owner stopped initiating transactions. Values match the
+// leaderboard contract's TTL policy so the whole system ages at one rate.
+/// Refresh threshold: extend when fewer than ~1 year of ledgers remain.
+const TTL_BUMP: u32 = 3_153_600;
+/// Extend to ~2 years of ledgers.
+const TTL_HIGH: u32 = 6_307_200;
+const MAX_MINTERS: u32 = 10;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -21,7 +35,11 @@ pub enum TokenError {
     NotAdmin = 6,
     InsufficientAllowance = 7,
     InvalidExpirationLedger = 8,
+    // Issue #95: operation blocked because the contract is paused.
     ContractPaused = 9,
+    AlreadyMinter = 10,
+    NotMinter = 11,
+    MinterListFull = 12,
 }
 
 #[contracttype]
@@ -36,6 +54,9 @@ pub enum DataKey {
     Decimals,
     Allowance(Address, Address),
     Paused,
+    MinterAt(u32),
+    MinterCount,
+    MinterIndex(Address),
 }
 
 #[contracttype]
@@ -66,6 +87,11 @@ impl PULSETokenContract {
         env.storage().instance().set(&DataKey::Symbol, &symbol);
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::TotalSupply, &0_i128);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "initialized"), admin),
+            (name, symbol, decimals),
+        );
         Ok(())
     }
 
@@ -99,6 +125,8 @@ impl PULSETokenContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
+        Self::bump_instance_ttl(&env);
+        env.events().publish((Symbol::new(&env, "paused"), admin), true);
         Ok(())
     }
 
@@ -110,6 +138,8 @@ impl PULSETokenContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
+        Self::bump_instance_ttl(&env);
+        env.events().publish((Symbol::new(&env, "unpaused"), admin), true);
         Ok(())
     }
 
@@ -123,19 +153,104 @@ impl PULSETokenContract {
     pub fn set_minter(env: Env, minter: Address) -> Result<(), TokenError> {
         let admin: Address = Self::require_admin(&env)?;
         admin.require_auth();
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::AuthorizedMinter(minter.clone()))
+            .unwrap_or(false)
+        {
+            return Err(TokenError::AlreadyMinter);
+        }
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinterCount)
+            .unwrap_or(0);
+        if count >= MAX_MINTERS {
+            return Err(TokenError::MinterListFull);
+        }
+        let minter_key = DataKey::AuthorizedMinter(minter.clone());
+        env.storage().persistent().set(&minter_key, &true);
+        env.storage().persistent().extend_ttl(&minter_key, TTL_BUMP, TTL_HIGH);
+        // Track in the audit list
+        let index_key = DataKey::MinterIndex(minter.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::AuthorizedMinter(minter), &true);
+            .set(&index_key, &count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, TTL_BUMP, TTL_HIGH);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinterAt(count), &minter);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinterCount, &(count + 1));
+        Self::bump_instance_ttl(&env);
+        env.events().publish((Symbol::new(&env, "minter_added"), minter), true);
         Ok(())
     }
 
     pub fn remove_minter(env: Env, minter: Address) -> Result<(), TokenError> {
         let admin: Address = Self::require_admin(&env)?;
         admin.require_auth();
+        if !env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&DataKey::AuthorizedMinter(minter.clone()))
+            .unwrap_or(false)
+        {
+            return Err(TokenError::NotMinter);
+        }
         env.storage()
             .persistent()
             .remove(&DataKey::AuthorizedMinter(minter));
+        Self::bump_instance_ttl(&env);
         Ok(())
+    }
+
+    /// Issue #95 circuit breaker: pause all supply-changing operations while
+    /// an emergency is handled. The caller must be the admin; idempotent.
+    /// Transfers/allowances stay available so user funds are never locked.
+    pub fn set_paused(env: Env, caller: Address, paused: bool) -> Result<(), TokenError> {
+        let admin: Address = Self::require_admin(&env)?;
+        if caller != admin {
+            return Err(TokenError::NotAdmin);
+        }
+        caller.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Self::bump_instance_ttl(&env);
+        Ok(())
+    }
+
+    pub fn paused(env: Env) -> bool {
+        Self::is_paused(env)
+    }
+
+    pub fn get_authorized_minters(env: Env) -> soroban_sdk::Vec<Address> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinterCount)
+            .unwrap_or(0);
+        let mut result: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        for i in 0..count {
+            if let Some(addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::MinterAt(i))
+            {
+                if env
+                    .storage()
+                    .persistent()
+                    .get::<_, bool>(&DataKey::AuthorizedMinter(addr.clone()))
+                    .unwrap_or(false)
+                {
+                    result.push_back(addr);
+                }
+            }
+        }
+        result
     }
 
     pub fn mint(env: Env, minter: Address, to: Address, amount: i128) -> Result<(), TokenError> {
@@ -144,18 +259,22 @@ impl PULSETokenContract {
             return Err(TokenError::InvalidAmount);
         }
         minter.require_auth();
+        let minter_key = DataKey::AuthorizedMinter(minter.clone());
         let is_minter: bool = env
             .storage()
             .persistent()
-            .get(&DataKey::AuthorizedMinter(minter))
+            .get(&minter_key)
             .unwrap_or(false);
         if !is_minter {
             return Err(TokenError::UnauthorizedMinter);
         }
-        let balance = Self::balance(env.clone(), to.clone());
+        // An authorization grant that expires silently disables the minter
+        // (e.g. the leaderboard paying out rewards), so refresh it on use.
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to), &(balance + amount));
+            .extend_ttl(&minter_key, TTL_BUMP, TTL_HIGH);
+        let balance = Self::balance(env.clone(), to.clone());
+        Self::write_balance(&env, &to, balance + amount);
         let supply: i128 = env
             .storage()
             .instance()
@@ -164,6 +283,11 @@ impl PULSETokenContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &(supply + amount));
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "mint"), minter, to),
+            amount,
+        );
         Ok(())
     }
 
@@ -177,13 +301,14 @@ impl PULSETokenContract {
         if from_balance < amount {
             return Err(TokenError::InsufficientBalance);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from), &(from_balance - amount));
+        Self::write_balance(&env, &from, from_balance - amount);
         let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to), &(to_balance + amount));
+        Self::write_balance(&env, &to, to_balance + amount);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "transfer"), from, to),
+            amount,
+        );
         Ok(())
     }
 
@@ -245,6 +370,7 @@ impl PULSETokenContract {
         to: Address,
         amount: i128,
     ) -> Result<(), TokenError> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(TokenError::InvalidAmount);
         }
@@ -280,13 +406,14 @@ impl PULSETokenContract {
             );
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from), &(from_balance - amount));
+        Self::write_balance(&env, &from, from_balance - amount);
         let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to), &(to_balance + amount));
+        Self::write_balance(&env, &to, to_balance + amount);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "transfer"), from, to),
+            amount,
+        );
         Ok(())
     }
 
@@ -300,9 +427,7 @@ impl PULSETokenContract {
         if from_balance < amount {
             return Err(TokenError::InsufficientBalance);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from), &(from_balance - amount));
+        Self::write_balance(&env, &from, from_balance - amount);
         let supply: i128 = env
             .storage()
             .instance()
@@ -311,6 +436,8 @@ impl PULSETokenContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &(supply - amount));
+        Self::bump_instance_ttl(&env);
+        env.events().publish((Symbol::new(&env, "burn"), from), amount);
         Ok(())
     }
 
@@ -347,6 +474,30 @@ impl PULSETokenContract {
             .instance()
             .get(&DataKey::Decimals)
             .unwrap_or(7)
+    }
+
+    /// The single write path for every balance mutation (issue #97).
+    ///
+    /// `set` and `extend_ttl` are deliberately kept together here instead of
+    /// being repeated at each call site: a path that writes a `Balance` key
+    /// without extending it leaves that holder's entry to be evicted by the
+    /// ledger, destroying their tokens while `TotalSupply` still counts them.
+    /// Routing every mutation through one function makes that omission
+    /// impossible to reintroduce in a new code path.
+    fn write_balance(env: &Env, account: &Address, amount: i128) {
+        let key = DataKey::Balance(account.clone());
+        env.storage().persistent().set(&key, &amount);
+        env.storage().persistent().extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+    }
+
+    /// Refresh the instance entry holding `TotalSupply`, `Admin`, `Paused`
+    /// and the token metadata (issue #97). Instance storage carries one TTL
+    /// of its own, independent of the per-key TTLs on persistent entries, so
+    /// a contract that only ever bumped balances would still let its supply
+    /// counter — the other half of the `total_supply == sum(balances)`
+    /// invariant — expire out from under it.
+    fn bump_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
     }
 
     fn require_admin(env: &Env) -> Result<Address, TokenError> {
