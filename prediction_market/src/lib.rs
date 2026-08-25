@@ -20,6 +20,7 @@ use soroban_sdk::{
 // withdraw_cancelled (admin)                  caller
 // config_changed     (admin)                  Config
 // paused / unpaused  (admin)                  ()
+// claim_window_expired (user, id)             ()
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -57,6 +58,8 @@ const DISPUTE_WINDOW_SECS: u64 = 604_800; // 7 days
 const TTL_BUMP: u32 = 3_153_600;
 const TTL_HIGH: u32 = 6_307_200;
 const MAX_TTL_REFRESH_PAGE: u32 = 20;
+// Claim window: after resolution, users have 30 days to claim winnings.
+const CLAIM_WINDOW_TTL: u32 = 2_592_000; // ~30 days in ledgers
 
 // Issue #84: bump whenever a function signature, argument order, or return
 // type that a caller relies on changes.
@@ -859,7 +862,7 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&bet_key, &new_entry);
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, TTL_HIGH, TTL_HIGH);
 
         // ── Bettor index (first bet only) ─────────────────────────────────
         if !is_increase {
@@ -1055,7 +1058,10 @@ impl PredictionMarketContract {
                         env.storage().persistent().set(&payout_key, &payout);
                         env.storage()
                             .persistent()
-                            .extend_ttl(&payout_key, TTL_BUMP, TTL_HIGH);
+                            .extend_ttl(&payout_key, CLAIM_WINDOW_TTL, TTL_HIGH);
+                        env.storage()
+                            .persistent()
+                            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
                         payout_sum += payout;
                     }
                 }
@@ -1225,11 +1231,20 @@ impl PredictionMarketContract {
 
         // OPT: read BetEntry (which now contains gross) — was a separate BetGross key
         let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env
+        let mut entry: BetEntry = match env
             .storage()
             .persistent()
             .get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
+        {
+            Some(e) => e,
+            None => {
+                env.events().publish(
+                    (Symbol::new(&env, "claim_window_expired"), user.clone(), market_id),
+                    (),
+                );
+                return Err(MarketError::NoBetFound);
+            }
+        };
 
         if entry.gross == 0 {
             return Err(MarketError::NoBetFound);
@@ -1244,7 +1259,7 @@ impl PredictionMarketContract {
         // late to a cancelled market can still pull their refund.
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
@@ -1282,11 +1297,20 @@ impl PredictionMarketContract {
         Self::enforce_zero_side_claim_window(&env, market_id)?;
 
         let bet_key = DataKey::Bet(market_id, user.clone());
-        let mut entry: BetEntry = env
+        let mut entry: BetEntry = match env
             .storage()
             .persistent()
             .get(&bet_key)
-            .ok_or(MarketError::NoBetFound)?;
+        {
+            Some(e) => e,
+            None => {
+                env.events().publish(
+                    (Symbol::new(&env, "claim_window_expired"), user.clone(), market_id),
+                    (),
+                );
+                return Err(MarketError::NoBetFound);
+            }
+        };
 
         if entry.claimed {
             return Err(MarketError::AlreadyClaimed);
@@ -1304,11 +1328,11 @@ impl PredictionMarketContract {
         env.storage().persistent().set(&bet_key, &entry);
         env.storage()
             .persistent()
-            .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Market(market_id), TTL_BUMP, TTL_HIGH);
-        Self::bump_if_present(&env, &DataKey::Payout(market_id, user.clone()));
+        Self::bump_if_present(&env, &DataKey::Payout(market_id, user.clone()), None);
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         let this = env.current_contract_address();
@@ -1526,21 +1550,37 @@ impl PredictionMarketContract {
     // ── View Functions ────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, MarketError> {
-        Self::load_market(&env, market_id)
+        let mkt_key = DataKey::Market(market_id);
+        let market = env
+            .storage()
+            .persistent()
+            .get(&mkt_key)
+            .ok_or(MarketError::MarketNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
+        Ok(market)
     }
 
     // OPT: returns Bet (ABI-compatible) derived from BetEntry
     pub fn get_bet(env: Env, market_id: u64, user: Address) -> Result<Bet, MarketError> {
-        let e: BetEntry = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Bet(market_id, user))
-            .ok_or(MarketError::NoBetFound)?;
-        Ok(Bet {
-            amount: e.net,
-            is_yes: e.is_yes,
-            claimed: e.claimed,
-        })
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        if let Some(e) = env.storage().persistent().get(&bet_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            Ok(Bet {
+                amount: e.net,
+                is_yes: e.is_yes,
+                claimed: e.claimed,
+            })
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+            Err(MarketError::NoBetFound)
+        }
     }
 
     pub fn get_market_count(env: Env) -> u64 {
@@ -1661,6 +1701,26 @@ impl PredictionMarketContract {
         Ok(bumped)
     }
 
+    pub fn bump_ttl(env: Env, market_id: u64, user: Address) -> Result<(), MarketError> {
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        let mkt_key = DataKey::Market(market_id);
+        if env.storage().persistent().has(&bet_key)
+            || env.storage().persistent().has(&payout_key)
+        {
+            Self::bump_if_present(&env, &bet_key, None);
+            Self::bump_if_present(&env, &payout_key, None);
+            Self::bump_if_present(&env, &mkt_key, None);
+            Ok(())
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+            Err(MarketError::NoBetFound)
+        }
+    }
+
     pub fn is_fee_recipient(env: Env, recipient: Address) -> bool {
         env.storage()
             .persistent()
@@ -1669,32 +1729,74 @@ impl PredictionMarketContract {
     }
 
     pub fn get_pending_withdrawal(env: Env, caller: Address) -> Option<WithdrawalRequest> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::PendingWithdrawal(caller))
+        let key = DataKey::PendingWithdrawal(caller.clone());
+        let req = env.storage().persistent().get(&key);
+        if req.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        }
+        req
     }
 
     pub fn get_payout(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Payout(market_id, user))
-            .unwrap_or(0)
+        let key = DataKey::Payout(market_id, user.clone());
+        let payout: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+            let bet_key = DataKey::Bet(market_id, user);
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+        }
+        payout
     }
 
     pub fn get_user_bet_count(env: Env, market_id: u64, user: Address) -> u32 {
-        env.storage()
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        if let Some(e) = env
+            .storage()
             .persistent()
-            .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))
-            .map(|e| e.count)
-            .unwrap_or(0)
+            .get::<DataKey, BetEntry>(&bet_key)
+        {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            e.count
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+            0
+        }
     }
 
     pub fn get_bet_gross(env: Env, market_id: u64, user: Address) -> i128 {
-        env.storage()
+        let bet_key = DataKey::Bet(market_id, user.clone());
+        if let Some(e) = env
+            .storage()
             .persistent()
-            .get::<DataKey, BetEntry>(&DataKey::Bet(market_id, user))
-            .map(|e| e.gross)
-            .unwrap_or(0)
+            .get::<DataKey, BetEntry>(&bet_key)
+        {
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+            e.gross
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "claim_window_expired"), user, market_id),
+                (),
+            );
+            0
+        }
     }
 
     // ── Internal Helpers ──────────────────────────────────────────────────
@@ -1893,11 +1995,12 @@ impl PredictionMarketContract {
             .ok_or(MarketError::MarketNotFound)
     }
 
-    fn bump_if_present(env: &Env, key: &DataKey) {
+    fn bump_if_present(env: &Env, key: &DataKey, ttl: Option<u32>) {
         if env.storage().persistent().has(key) {
+            let ttl = ttl.unwrap_or(TTL_BUMP);
             env.storage()
                 .persistent()
-                .extend_ttl(key, TTL_BUMP, TTL_HIGH);
+                .extend_ttl(key, ttl, TTL_HIGH);
         }
     }
 
@@ -1908,14 +2011,14 @@ impl PredictionMarketContract {
         if !env.storage().persistent().has(&mkt_key) {
             return Err(MarketError::MarketNotFound);
         }
-        Self::bump_if_present(env, &mkt_key);
+        Self::bump_if_present(env, &mkt_key, None);
 
         let bettors: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::BettorCount(market_id))
             .unwrap_or(0);
-        Self::bump_if_present(env, &DataKey::BettorCount(market_id));
+        Self::bump_if_present(env, &DataKey::BettorCount(market_id), None);
         for i in 0..bettors {
             let slot_key = DataKey::BettorAt(market_id, i);
             if let Some(addr) = env
@@ -1923,13 +2026,13 @@ impl PredictionMarketContract {
                 .persistent()
                 .get::<DataKey, Address>(&slot_key)
             {
-                Self::bump_if_present(env, &slot_key);
-                Self::bump_if_present(env, &DataKey::Bet(market_id, addr.clone()));
-                Self::bump_if_present(env, &DataKey::Payout(market_id, addr));
+                Self::bump_if_present(env, &slot_key, None);
+                Self::bump_if_present(env, &DataKey::Bet(market_id, addr.clone()), Some(CLAIM_WINDOW_TTL));
+                Self::bump_if_present(env, &DataKey::Payout(market_id, addr), Some(CLAIM_WINDOW_TTL));
             }
         }
-        Self::bump_if_present(env, &DataKey::MarketFees(market_id));
-        Self::bump_if_present(env, &DataKey::ForfeitedPool(market_id));
+        Self::bump_if_present(env, &DataKey::MarketFees(market_id), None);
+        Self::bump_if_present(env, &DataKey::ForfeitedPool(market_id), None);
         env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(bettors)
     }
