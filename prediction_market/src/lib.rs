@@ -1059,6 +1059,9 @@ impl PredictionMarketContract {
                         env.storage()
                             .persistent()
                             .extend_ttl(&payout_key, CLAIM_WINDOW_TTL, TTL_HIGH);
+                        env.storage()
+                            .persistent()
+                            .extend_ttl(&bet_key, CLAIM_WINDOW_TTL, TTL_HIGH);
                         payout_sum += payout;
                     }
                 }
@@ -1700,10 +1703,14 @@ impl PredictionMarketContract {
 
     pub fn bump_ttl(env: Env, market_id: u64, user: Address) -> Result<(), MarketError> {
         let bet_key = DataKey::Bet(market_id, user.clone());
-        if env.storage().persistent().has(&bet_key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
+        let payout_key = DataKey::Payout(market_id, user.clone());
+        let mkt_key = DataKey::Market(market_id);
+        if env.storage().persistent().has(&bet_key)
+            || env.storage().persistent().has(&payout_key)
+        {
+            Self::bump_if_present(&env, &bet_key, None);
+            Self::bump_if_present(&env, &payout_key, None);
+            Self::bump_if_present(&env, &mkt_key, None);
             Ok(())
         } else {
             env.events().publish(
@@ -1739,12 +1746,10 @@ impl PredictionMarketContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
-            if payout > 0 {
-                let bet_key = DataKey::Bet(market_id, user);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
-            }
+            let bet_key = DataKey::Bet(market_id, user);
+            env.storage()
+                .persistent()
+                .extend_ttl(&bet_key, TTL_BUMP, TTL_HIGH);
         } else {
             env.events().publish(
                 (Symbol::new(&env, "claim_window_expired"), user, market_id),
