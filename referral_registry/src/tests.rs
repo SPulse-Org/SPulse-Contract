@@ -90,9 +90,6 @@ fn test_register_with_referrer() {
     t.client
         .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
 
-    // Issue #99: the referrer must be a registered participant first.
-    t.client
-        .register_referral(&referrer, &String::from_str(&t.env, "RefKing"), &None);
     t.client.register_referral(
         &user,
         &String::from_str(&t.env, "CryptoKing"),
@@ -287,11 +284,12 @@ fn test_credit_with_referrer() {
     let xlm_client = TokenClient::new(&t.env, &t.xlm_sac_id);
     assert_eq!(xlm_client.balance(&referrer), referral_fee);
 
-    // Referrer got 3 leaderboard bonus points for the referred bet.
+    // Referrer got 3 leaderboard bonus points for the referred bet
+    // plus 5 welcome bonus points from registration (total 8 pts).
     // Bonus points are queued and claimed explicitly.
     let lb_client = leaderboard::LeaderboardContractClient::new(&t.env, &t.leaderboard_id);
     lb_client.claim_pending_rewards(&referrer);
-    assert_eq!(lb_client.get_points(&referrer), 3);
+    assert_eq!(lb_client.get_points(&referrer), 8);
 
     // Earnings tracked
     assert_eq!(t.client.get_earnings(&referrer), referral_fee);
@@ -410,7 +408,7 @@ fn test_referrer_bonus_points_accumulate() {
     let lb_client = leaderboard::LeaderboardContractClient::new(&t.env, &t.leaderboard_id);
     assert_eq!(lb_client.get_points(&referrer), 0); // still queued
     lb_client.claim_pending_rewards(&referrer);
-    assert_eq!(lb_client.get_points(&referrer), 9); // 3 × 3 pts
+    assert_eq!(lb_client.get_points(&referrer), 14); // 5 welcome + 3 × 3 pts
 }
 
 // ── 11. Referral count tracking ──────────────────────────────────────────────
