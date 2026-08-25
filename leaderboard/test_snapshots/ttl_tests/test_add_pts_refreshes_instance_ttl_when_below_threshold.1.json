@@ -202,7 +202,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 3157696
+        "live_until": 9460801
       },
       {
         "entry": {
@@ -229,6 +229,18 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "InterfaceVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {

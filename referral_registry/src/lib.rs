@@ -1,13 +1,27 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, IntoVal,
-    String, Symbol, Val,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Error, IntoVal, String, Symbol, Val,
 };
 
 const WELCOME_BONUS_POINTS: u64 = 5;
 const WELCOME_BONUS_TOKENS: i128 = 1_0000000;
 const REFERRAL_BET_POINTS: u64 = 3;
+
+// TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
+const TTL_BUMP: u32 = 3_153_600;
+const TTL_HIGH: u32 = 6_307_200;
+
+// ── Interface versioning (upgrade coordination) ──────────────────────────────
+// INTERFACE_VERSION identifies the ABI this contract exposes to its callers.
+// It MUST be bumped in the source AND committed to storage via
+// set_interface_version() on every incompatible ABI change, so upstream
+// callers can fail closed instead of executing against a mismatched ABI.
+pub const INTERFACE_VERSION: u32 = 1;
+// Minimum interface version required from the leaderboard before invoking
+// reward_bonus (register_referral) or add_bonus_pts (credit).
+const LEADERBOARD_BONUS_INTERFACE_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -19,6 +33,21 @@ pub enum ReferralError {
     AlreadyRegistered = 4,
     SelfReferral = 5,
     NotAdmin = 6,
+    // ── Interface versioning (upgrade coordination) ────────────────────────
+    // The target contract does not expose the interface_version() function.
+    InterfaceVersionMissing = 7,
+    // The target contract's interface version is below the required minimum.
+    IncompatibleInterface = 8,
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // A trusted dependency (leaderboard / xlm_sac) was revoked by the admin;
+    // every operation that depends on that role fails closed until restore.
+    TrustRevoked = 9,
+    // revoke_trust/restore_trust was called with an unknown role symbol.
+    InvalidRole = 10,
+    // ── Emergency pause ───────────────────────────────────────────────────
+    ContractPaused = 11,
+    // Referrer address provided during registration is not registered.
+    ReferrerNotRegistered = 12,
 }
 
 #[contracttype]
@@ -42,6 +71,14 @@ pub enum DataKey {
     TokenContract,
     LeaderboardContract,
     XlmSacContract,
+    // ── Interface versioning (upgrade coordination) ───────────────────────
+    InterfaceVersion, // u32 — current interface version of this contract
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // Persistent flag (true) meaning the trusted contract for `role` is
+    // revoked. Absent key == trusted/enabled.
+    TrustRevoked(Symbol),
+    // ── Emergency pause ───────────────────────────────────────────────────
+    Paused,
 }
 
 // Lever A: packed registrant profile — one storage slot instead of three.
@@ -82,7 +119,18 @@ impl ReferralRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::XlmSacContract, &xlm_sac);
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &INTERFACE_VERSION);
         Ok(())
+    }
+
+    /// The cross-contract ABI version this deployment implements (issue #84).
+    pub fn interface_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InterfaceVersion)
+            .unwrap_or(0)
     }
 
     // ── Upgradeability & Config (admin only) ──────────────────────────────────
@@ -109,12 +157,122 @@ impl ReferralRegistryContract {
         Ok(())
     }
 
+    /// Declare this contract's interface version. Admin only.
+    pub fn set_interface_version(
+        env: Env,
+        admin: Address,
+        version: u32,
+    ) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::InterfaceVersion, &version);
+        Ok(())
+    }
+
+    // ── Emergency pause ───────────────────────────────────────────────────
+
+    /// Halt registration and crediting in an emergency. Admin only. View
+    /// functions keep working so the frontend can still read state.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Resume registration and crediting. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    // ── Revocable trust model (issue #40) ─────────────────────────────────
+    // The registry trusts the market (sole caller of credit), the leaderboard
+    // (reward_bonus / add_bonus_pts), and the XLM SAC (fee payouts). Each is a
+    // role the admin can revoke to sever the trust relationship immediately —
+    // every operation that depends on the role then fails closed with
+    // TrustRevoked. Restoration is an explicit, admin-only act.
+
+    /// Revoke trust in the contract bound to `role`. Admin only.
+    ///
+    /// Roles: "market", "leaderboard", "xlm_sac" (and "token", stored for the
+    /// legacy minter config — inert today because the leaderboard mints
+    /// internally, but tracked so the relationship stays auditable).
+    pub fn revoke_trust(env: Env, admin: Address, role: Symbol) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(ReferralError::InvalidRole);
+        }
+        let key = DataKey::TrustRevoked(role);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Restore trust in the contract bound to `role`. Admin only.
+    pub fn restore_trust(env: Env, admin: Address, role: Symbol) -> Result<(), ReferralError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        if !Self::is_known_role(&env, &role) {
+            return Err(ReferralError::InvalidRole);
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustRevoked(role));
+        Ok(())
+    }
+
+    /// Read-only trust status for `role` (true == revoked). Never panics,
+    /// never requires admin — usable by anyone to observe revocation state.
+    pub fn is_trust_revoked(env: Env, role: Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+    }
+
+    fn is_known_role(env: &Env, role: &Symbol) -> bool {
+        *role == Symbol::new(env, "market")
+            || *role == Symbol::new(env, "leaderboard")
+            || *role == Symbol::new(env, "token")
+            || *role == Symbol::new(env, "xlm_sac")
+    }
+
+    fn require_trust_not_revoked(env: &Env, role: Symbol) -> Result<(), ReferralError> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::TrustRevoked(role))
+            .unwrap_or(false)
+        {
+            return Err(ReferralError::TrustRevoked);
+        }
+        Ok(())
+    }
+
+    // ── Public API ─────────────────────────────────────────────────────────
+
     pub fn register_referral(
         env: Env,
         user: Address,
         display_name: String,
         referrer: Option<Address>,
     ) -> Result<(), ReferralError> {
+        Self::require_not_paused(&env)?;
         user.require_auth();
         if Self::is_registered(env.clone(), user.clone()) {
             return Err(ReferralError::AlreadyRegistered);
@@ -123,7 +281,25 @@ impl ReferralRegistryContract {
             if *ref_addr == user {
                 return Err(ReferralError::SelfReferral);
             }
+            if !Self::is_registered(env.clone(), ref_addr.clone()) {
+                return Err(ReferralError::ReferrerNotRegistered);
+            }
         }
+        // Upgrade coordination: verify the leaderboard exposes a compatible
+        // `reward_bonus` interface BEFORE writing the profile or any state,
+        // so a unilateral incompatible upgrade fails the whole call atomically
+        // instead of registering the user and only then failing the bonus.
+        let leaderboard: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LeaderboardContract)
+            .unwrap();
+        // Issue #40: a revoked leaderboard dependency fails the whole
+        // registration — it must not register a user and silently skip the
+        // welcome bonus that the trust relationship is supposed to deliver.
+        Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
+        Self::require_interface_version(&env, &leaderboard, LEADERBOARD_BONUS_INTERFACE_VERSION)?;
+
         // Lever A: write ONE packed Profile entry (display_name + referrer)
         // instead of the three legacy keys (Registered + DisplayName + Referrer).
         // Existence of Profile(user) is what is_registered() now checks.
@@ -147,11 +323,8 @@ impl ReferralRegistryContract {
         }
 
         let this = env.current_contract_address();
-        let leaderboard: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::LeaderboardContract)
-            .unwrap();
+        // Upgrade coordination: the leaderboard was already verified to expose
+        // a compatible `reward_bonus` interface before the profile was written.
         let _: Val = env.invoke_contract(
             &leaderboard,
             &Symbol::new(&env, "reward_bonus"),
@@ -172,12 +345,35 @@ impl ReferralRegistryContract {
         user: Address,
         referral_fee: i128,
     ) -> Result<bool, ReferralError> {
+        Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_market_contract(&env, &caller)?;
+        // Issue #40: verify the XLM SAC trust before any fee payout in either
+        // branch below, so a revoked SAC fails closed before funds move.
+        Self::require_trust_not_revoked(&env, symbol_short!("xlm_sac"))?;
         // Lever A: resolve referrer via packed Profile (new) or legacy key (old).
         let referrer: Option<Address> = Self::load_profile(&env, &user).and_then(|p| p.referrer);
         match referrer {
             Some(ref_addr) => {
+                let leaderboard: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::LeaderboardContract)
+                    .unwrap();
+                // Issue #40: a revoked leaderboard dependency fails the whole
+                // credit — no fee paid out to a referral economy whose bonus
+                // leg is severed.
+                Self::require_trust_not_revoked(&env, Symbol::new(&env, "leaderboard"))?;
+                // Upgrade coordination: verify the leaderboard exposes a
+                // compatible `add_bonus_pts` interface BEFORE transferring the
+                // fee or writing any state, so a unilateral incompatible
+                // upgrade fails the whole call atomically instead of paying the
+                // referrer and only then discovering the ABI mismatch.
+                Self::require_interface_version(
+                    &env,
+                    &leaderboard,
+                    LEADERBOARD_BONUS_INTERFACE_VERSION,
+                )?;
                 let xlm_sac: Address = env
                     .storage()
                     .instance()
@@ -188,11 +384,6 @@ impl ReferralRegistryContract {
                     &ref_addr,
                     &referral_fee,
                 );
-                let leaderboard: Address = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::LeaderboardContract)
-                    .unwrap();
                 let _: Val = env.invoke_contract(
                     &leaderboard,
                     &Symbol::new(&env, "add_bonus_pts"),
@@ -231,6 +422,8 @@ impl ReferralRegistryContract {
             }
         }
     }
+
+    // ── Internal helpers ───────────────────────────────────────────────────
 
     fn load_profile(env: &Env, user: &Address) -> Option<UserProfile> {
         if let Some(p) = env
@@ -305,6 +498,35 @@ impl ReferralRegistryContract {
         if *caller != market {
             return Err(ReferralError::UnauthorizedCaller);
         }
+        // Issue #40: even the on-record market cannot drive credit() once its
+        // trust role has been revoked by the admin — fails closed deterministically.
+        Self::require_trust_not_revoked(env, symbol_short!("market"))?;
+        Ok(())
+    }
+
+    // ── Interface versioning helpers (upgrade coordination) ──────────────
+    // Reads `interface_version()` on the target contract and fails closed with
+    // a typed error when the target does not expose the function
+    // (InterfaceVersionMissing) or reports a version below the required
+    // minimum (IncompatibleInterface). Uses try_invoke_contract so a missing
+    // function or panicking target is caught deterministically instead of
+    // aborting with a generic host panic.
+    fn require_interface_version(
+        env: &Env,
+        target: &Address,
+        required: u32,
+    ) -> Result<(), ReferralError> {
+        let version: u32 = match env.try_invoke_contract::<u32, Error>(
+            target,
+            &Symbol::new(env, "interface_version"),
+            vec![&env],
+        ) {
+            Ok(Ok(v)) => v,
+            Ok(Err(_)) | Err(_) => return Err(ReferralError::InterfaceVersionMissing),
+        };
+        if version < required {
+            return Err(ReferralError::IncompatibleInterface);
+        }
         Ok(())
     }
 
@@ -316,6 +538,13 @@ impl ReferralRegistryContract {
             .ok_or(ReferralError::NotInitialized)?;
         if *caller != admin {
             return Err(ReferralError::NotAdmin);
+        }
+        Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ReferralError> {
+        if Self::is_paused(env.clone()) {
+            return Err(ReferralError::ContractPaused);
         }
         Ok(())
     }
