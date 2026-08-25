@@ -408,8 +408,7 @@ impl LeaderboardContract {
     }
 
     /// No-op stub retained for ABI compatibility. total_bets is derived at read
-    /// time, so a standalone "bet recorded" call does nothing.
-    pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
+    /// time, so a standalone "bet recorded" call does nothing.    pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
         Self::require_market_contract(&env, &caller)?;
         // No-op: total_bets is derived at read time.
