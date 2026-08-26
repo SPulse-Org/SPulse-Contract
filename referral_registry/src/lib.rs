@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, Env,
-    IntoVal, String, Symbol, Vec,
+    IntoVal, String, Symbol, Val, Vec,
 };
 
 pub const INTERFACE_VERSION: u32 = 1;
@@ -173,6 +173,7 @@ impl ReferralRegistryContract {
             .extend_ttl(&DataKey::DisplayName(user.clone()), TTL_BUMP, TTL_HIGH);
 
         let lb = Self::leaderboard_contract(&env)?;
+        Self::require_compatible_leaderboard(&env, &lb)?;
         let this = env.current_contract_address();
         let _: Val = env.invoke_contract(
             &lb,
@@ -182,7 +183,7 @@ impl ReferralRegistryContract {
                 this.into_val(&env),
                 user.into_val(&env),
                 WELCOME_BONUS_PTS.into_val(&env),
-                0_i128.into_val(&env),
+                WELCOME_BONUS_TOKENS.into_val(&env),
             ],
         );
 
@@ -223,6 +224,7 @@ impl ReferralRegistryContract {
                 xlm.transfer(&this, &ref_addr, &amount);
 
                 let lb = Self::leaderboard_contract(&env)?;
+                Self::require_compatible_leaderboard(&env, &lb)?;
                 let _: Val = env.invoke_contract(
                     &lb,
                     &Symbol::new(&env, "reward_bonus"),
@@ -320,6 +322,21 @@ impl ReferralRegistryContract {
             .instance()
             .get(&DataKey::LeaderboardContract)
             .ok_or(ReferralError::NotInitialized)
+    }
+
+    fn require_compatible_leaderboard(
+        env: &Env,
+        leaderboard: &Address,
+    ) -> Result<(), ReferralError> {
+        let version: u32 = env.invoke_contract(
+            leaderboard,
+            &Symbol::new(env, "interface_version"),
+            vec![env],
+        );
+        if version != INTERFACE_VERSION {
+            return Err(ReferralError::IncompatibleInterface);
+        }
+        Ok(())
     }
 
     fn referral_depth(env: &Env, user: &Address) -> u32 {

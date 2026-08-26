@@ -94,6 +94,7 @@ fn test_register_referral_without_referrer() {
 
     assert_eq!(t.client.get_referrer(&user), None);
     assert_eq!(t.client.get_display_name(&user), Some(String::from_str(&t.env, "User")));
+    assert_eq!(t.token_client.balance(&user), WELCOME_BONUS_TOKENS);
 }
 
 #[test]
@@ -259,10 +260,10 @@ fn test_referral_depth_limit() {
         &Option::<Address>::None,
     );
 
-    for i in 1..=max_depth {
+    for i in 1..=(max_depth + 1) {
         let referrer = users.get((i - 1) as u32).unwrap();
         let user = users.get(i as u32).unwrap();
-        let result = if i == max_depth {
+        let result = if i == max_depth + 1 {
             t.client.try_register_referral(
                 user,
                 &String::from_str(&t.env, "U"),
@@ -276,7 +277,7 @@ fn test_referral_depth_limit() {
             );
             Ok(())
         };
-        if i == max_depth {
+        if i == max_depth + 1 {
             assert!(result.is_err(), "should fail at depth limit");
         }
     }
