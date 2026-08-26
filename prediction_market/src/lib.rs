@@ -908,21 +908,39 @@ impl PredictionMarketContract {
         let this = env.current_contract_address();
         xlm.transfer(&user, &this, &amount);
 
-        // ── Referral (always check referral contract directly) ────────────
+        // ── Referral (validate registration before paying) ───────────────
         let _paid_referrer = {
             Self::require_compatible_referral(&env, &cfg.referral)?;
 
-            // Resolve the bettor's referrer and prove it is a registered
-            // participant BEFORE moving any funds (issue: unregistered
-            // referrers must never get paid). A user-chosen "referrer" that
-            // is not in the registry's ReferrerInfo storage is treated as
-            // referrer-less and the 50 bps stays here as platform revenue.
-            let referrer: Option<Address> = env.invoke_contract(
+            // Issue: unregistered referrers must never get paid.  Prove the
+            // bettor's stored referrer is a registered participant BEFORE
+            // moving any funds.  When there is no registered referrer the
+            // referral fee stays here as platform revenue.
+            let has_registered_referrer: bool = env.invoke_contract(
                 &cfg.referral,
-                &Symbol::new(&env, "get_referrer"),
+                &Symbol::new(&env, "is_registered_referrer"),
                 vec![&env, user.clone().into_val(&env)],
             );
-            result
+
+            if has_registered_referrer {
+                xlm.transfer(&this, &cfg.referral, &referral_fee);
+                let result: bool = env.invoke_contract(
+                    &cfg.referral,
+                    &Symbol::new(&env, "credit"),
+                    vec![
+                        &env,
+                        this.clone().into_val(&env),
+                        user.clone().into_val(&env),
+                        referral_fee.into_val(&env),
+                    ],
+                );
+                result
+            } else {
+                // No registered referrer — promotion fee becomes platform
+                // revenue credited to this market's fee ledger.
+                Self::credit_market_fees(&env, market_id, referral_fee);
+                false
+            }
         };
 
         // ── Release reentrancy lock ──────────────────────────────────────
