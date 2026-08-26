@@ -1,5 +1,8 @@
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Events}, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    Env, Symbol,
+};
 
 fn setup() -> (
     Env,
@@ -750,7 +753,9 @@ fn test_eviction_clears_reverse_mapping() {
     // Displaced player: unranked and no lingering reverse mapping.
     assert_eq!(client.get_rank(&weakest), UNRANKED_RANK);
     let still_mapped = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&DataKey::TopPlayerSlot(weakest.clone()))
+        env.storage()
+            .persistent()
+            .has(&DataKey::TopPlayerSlot(weakest.clone()))
     });
     assert!(!still_mapped);
 }

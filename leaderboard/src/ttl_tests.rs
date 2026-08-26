@@ -290,7 +290,9 @@ fn test_refresh_player_ttl_rebumps_stats() {
 
     let ttl = || {
         env.as_contract(&client.address, || {
-            env.storage().persistent().get_ttl(&DataKey::Stats(user.clone()))
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Stats(user.clone()))
         })
     };
     assert!(ttl() >= TTL_BUMP);

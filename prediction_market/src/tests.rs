@@ -285,11 +285,8 @@ fn test_fee_split_with_referrer() {
     fund_user(&t, &user, 200_0000000);
 
     let no_ref: Option<Address> = None;
-    t.referral_client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Referrer"),
-        &no_ref,
-    );
+    t.referral_client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Bettor"),
@@ -780,7 +777,8 @@ fn test_reject_drain_entire_accumulator_in_one_request() {
     t.client.add_fee_recipient(&t.admin, &recipient);
 
     let fees = t.client.get_accumulated_fees();
-    t.client.request_withdraw_fees(&recipient, &recipient, &fees);
+    t.client
+        .request_withdraw_fees(&recipient, &recipient, &fees);
 }
 
 // ── 27e. Payout is locked until the timelock elapses (issue #12) ──────────────
@@ -916,14 +914,14 @@ fn test_bettor_index_legacy_read_is_bounded() {
 
     // Simulate a large legacy index without spending time creating 101 bets.
     t.env.as_contract(&t.client.address, || {
-        t.env.storage().persistent().set(
-            &DataKey::BettorCount(id),
-            &(MAX_BETTORS_PER_PAGE + 1),
-        );
-        t.env.storage().persistent().set(
-            &DataKey::BettorAt(id, 0),
-            &first,
-        );
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorCount(id), &(MAX_BETTORS_PER_PAGE + 1));
+        t.env
+            .storage()
+            .persistent()
+            .set(&DataKey::BettorAt(id, 0), &first);
         t.env.storage().persistent().set(
             &DataKey::BettorAt(id, MAX_BETTORS_PER_PAGE),
             &beyond_first_page,
@@ -952,11 +950,8 @@ fn test_referrer_bonus_points_per_bet() {
     fund_user(&t, &user, 500_0000000);
 
     let no_ref: Option<Address> = None;
-    t.referral_client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Referrer"),
-        &no_ref,
-    );
+    t.referral_client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Fan"),
@@ -997,11 +992,8 @@ fn test_unregistered_referrer_fee_routed_to_market() {
     fund_user(&t, &user, 500_0000000);
 
     let no_ref: Option<Address> = None;
-    t.referral_client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Referrer"),
-        &no_ref,
-    );
+    t.referral_client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Fan"),
@@ -1012,7 +1004,10 @@ fn test_unregistered_referrer_fee_routed_to_market() {
     wipe_referrer_registration(&t, &referrer);
     assert!(!t.referral_client.is_registered_referrer(&referrer));
     // The bettor still points at them — this is exactly the trap.
-    assert_eq!(t.referral_client.get_referrer(&user), Some(referrer.clone()));
+    assert_eq!(
+        t.referral_client.get_referrer(&user),
+        Some(referrer.clone())
+    );
 
     let ref_xlm_before = t.xlm.balance(&referrer);
     t.client.place_bet(&user, &id, &true, &100_0000000_i128);
@@ -1033,11 +1028,8 @@ fn test_unregistered_referrer_cached_false_across_bets() {
     fund_user(&t, &user, 500_0000000);
 
     let no_ref: Option<Address> = None;
-    t.referral_client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Referrer"),
-        &no_ref,
-    );
+    t.referral_client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
     t.referral_client.register_referral(
         &user,
         &String::from_str(&t.env, "Fan"),
@@ -1365,11 +1357,8 @@ fn test_e2e_full_inter_contract_flow() {
     fund_user(&t, &bob, 1000_0000000);
 
     let no_ref: Option<Address> = None;
-    t.referral_client.register_referral(
-        &referrer,
-        &String::from_str(&t.env, "Referrer"),
-        &no_ref,
-    );
+    t.referral_client
+        .register_referral(&referrer, &String::from_str(&t.env, "Referrer"), &no_ref);
     t.referral_client.register_referral(
         &alice,
         &String::from_str(&t.env, "Alice"),
@@ -1541,11 +1530,11 @@ fn test_many_winners_payouts_exact_and_dust_swept() {
     t.client.claim(&w1, &id);
     t.client.claim(&w2, &id);
     t.client.claim(&w3, &id);
+    assert_eq!(bal_before - t.xlm.balance(&market_contract), p1 + p2 + p3);
     assert_eq!(
-        bal_before - t.xlm.balance(&market_contract),
-        p1 + p2 + p3
+        t.xlm.balance(&w1),
+        1_000_0000000_i128 - 30_000_001_i128 + p1
     );
-    assert_eq!(t.xlm.balance(&w1), 1_000_0000000_i128 - 30_000_001_i128 + p1);
 }
 
 // ── #2: single winner receives the whole pool (no dust) ─────────────────────
@@ -1608,8 +1597,9 @@ fn test_claim_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let before_bet = ttl(&bet_key);
     let before_market = ttl(&market_key);
@@ -1637,8 +1627,9 @@ fn test_cancel_refund_rebumps_ttl_entries() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let bet_before = ttl(&bet_key);
     let market_before = ttl(&market_key);
@@ -1673,8 +1664,9 @@ fn test_refresh_market_ttl_rebumps_bet_and_market() {
     let bet_key = DataKey::Bet(id, user.clone());
     let market_key = DataKey::Market(id);
     let ttl = |key: &DataKey| -> u32 {
-        t.env
-            .as_contract(&market_contract, || t.env.storage().persistent().get_ttl(key))
+        t.env.as_contract(&market_contract, || {
+            t.env.storage().persistent().get_ttl(key)
+        })
     };
     let bet_before = ttl(&bet_key);
     let market_before = ttl(&market_key);
@@ -1718,7 +1710,8 @@ fn test_resolve_market_rebumps_payout_entry() {
 
     let market_contract = t.client.address.clone();
     let payout_ttl = t.env.as_contract(&market_contract, || {
-        t.env.storage()
+        t.env
+            .storage()
             .persistent()
             .get_ttl(&DataKey::Payout(id, user.clone()))
     });
@@ -2051,13 +2044,8 @@ fn test_set_config_does_not_apply_immediately() {
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
 
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
 
     // Live config is unchanged until execute_set_config after the delay.
     assert_eq!(t.client.get_config().leaderboard, cfg.leaderboard);
@@ -2102,13 +2090,8 @@ fn test_set_config_execute_before_delay() {
     let t = setup();
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
     t.client.execute_set_config(&t.admin);
 }
 
@@ -2117,13 +2100,8 @@ fn test_set_config_execute_after_delay_and_pin() {
     let t = setup();
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
     advance_time(&t.env, CONFIG_DELAY_SECS);
     t.client.execute_set_config(&t.admin);
 
@@ -2138,13 +2116,8 @@ fn test_cancel_set_config_during_dispute_window() {
     let t = setup();
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
     t.client.cancel_set_config(&t.admin);
     assert!(t.client.get_pending_config().is_none());
     assert_eq!(t.client.get_config().leaderboard, cfg.leaderboard);
@@ -2160,13 +2133,8 @@ fn test_set_config_multisig_requires_threshold() {
 
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
     advance_time(&t.env, CONFIG_DELAY_SECS);
     // Only the proposer approved (1 of 2).
     t.client.execute_set_config(&t.admin);
@@ -2181,13 +2149,8 @@ fn test_set_config_multisig_execute_with_second_approval() {
 
     let cfg = t.client.get_config();
     let new_lb = second_leaderboard(&t);
-    t.client.set_config(
-        &t.admin,
-        &cfg.token,
-        &cfg.referral,
-        &new_lb,
-        &cfg.xlm_sac,
-    );
+    t.client
+        .set_config(&t.admin, &cfg.token, &cfg.referral, &new_lb, &cfg.xlm_sac);
     t.client.approve_set_config(&g2);
     advance_time(&t.env, CONFIG_DELAY_SECS);
     t.client.execute_set_config(&g2);
@@ -2218,9 +2181,7 @@ fn last_event_name(env: &Env) -> Symbol {
         ContractEventBody::V0(v0) => &v0.topics,
     };
     match topics.as_slice().first().expect("event without topics") {
-        ScVal::Symbol(name) => {
-            Symbol::new(env, core::str::from_utf8(name.as_slice()).unwrap())
-        }
+        ScVal::Symbol(name) => Symbol::new(env, core::str::from_utf8(name.as_slice()).unwrap()),
         other => panic!("first topic is not a symbol: {other:?}"),
     }
 }
@@ -2229,7 +2190,10 @@ fn last_event_name(env: &Env) -> Symbol {
 fn test_create_market_emits_event() {
     let t = setup();
     let _id = create_test_market(&t);
-    assert_eq!(last_event_name(&t.env), Symbol::new(&t.env, "market_created"));
+    assert_eq!(
+        last_event_name(&t.env),
+        Symbol::new(&t.env, "market_created")
+    );
 }
 
 #[test]
@@ -2254,7 +2218,10 @@ fn test_resolve_market_emits_event() {
     t.client.place_bet(&bob, &id, &false, &100_0000000_i128);
     advance_time(&t.env, 3601);
     t.client.resolve_market(&t.admin, &id, &true);
-    assert_eq!(last_event_name(&t.env), Symbol::new(&t.env, "market_resolved"));
+    assert_eq!(
+        last_event_name(&t.env),
+        Symbol::new(&t.env, "market_resolved")
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2362,8 +2329,7 @@ fn test_fee_recipient_two_step_cannot_target_arbitrary_address() {
 
     let fees = t.client.get_accumulated_fees();
     let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
-    t.client
-        .request_withdraw_fees(&recipient, &stranger, &cap);
+    t.client.request_withdraw_fees(&recipient, &stranger, &cap);
 }
 
 #[test]
@@ -2383,7 +2349,10 @@ fn test_migrate_fee_ledger_snapshots_legacy_balance() {
             .storage()
             .instance()
             .set(&DataKey::AccumulatedFees, &legacy_amount);
-        t.env.storage().instance().remove(&DataKey::FeeLedgerMigrated);
+        t.env
+            .storage()
+            .instance()
+            .remove(&DataKey::FeeLedgerMigrated);
     });
 
     t.client.migrate_fee_ledger();
@@ -2506,7 +2475,11 @@ fn test_two_sided_loser_does_not_receive_xlm_on_claim() {
 
     let bob_before = t.xlm.balance(&bob);
     t.client.claim(&bob, &id);
-    assert_eq!(t.xlm.balance(&bob), bob_before, "loser must not receive XLM");
+    assert_eq!(
+        t.xlm.balance(&bob),
+        bob_before,
+        "loser must not receive XLM"
+    );
     assert_eq!(t.token_client.balance(&bob), 2_0000000);
 }
 

@@ -53,7 +53,7 @@ const MAX_WITHDRAWAL_BPS: i128 = 2_000; // per-request cap: 20% of accumulated f
 const CONFIG_DELAY_SECS: u64 = 86_400; // issue #51: dispute window before Config is live
 const MAX_GOVERNORS: u32 = 10;
 const LEGACY_MARKET_ID: u64 = 0; // unattributed pre-upgrade fee bucket
-// Issue #3: challenge window after empty-side resolution before claims/fees unlock.
+                                 // Issue #3: challenge window after empty-side resolution before claims/fees unlock.
 const DISPUTE_WINDOW_SECS: u64 = 604_800; // 7 days
 
 // TTL: ~1yr threshold, ~2yr extend (mainnet: ~1 ledger/5s)
@@ -104,7 +104,7 @@ pub enum MarketError {
     NoWithdrawalRequest = 24,
     WithdrawalTooSoon = 25,
     ContractPaused = 26,
-    InvalidDuration = 27, // issue #10: duration below the minimum
+    InvalidDuration = 27,   // issue #10: duration below the minimum
     InvalidDependency = 28, // issue #51: address is not the expected executable kind
     WasmHashMismatch = 29,  // issue #51: live WASM hash != pinned / pending hash
     ConfigChangeExists = 30,
@@ -320,7 +320,9 @@ impl PredictionMarketContract {
         env.storage()
             .persistent()
             .set(&DataKey::Governor(admin.clone()), &true);
-        env.storage().instance().set(&DataKey::GovernorCount, &1_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorCount, &1_u32);
         env.storage()
             .instance()
             .set(&DataKey::GovernorThreshold, &1_u32);
@@ -337,7 +339,12 @@ impl PredictionMarketContract {
         }
         env.events().publish(
             (Symbol::new(&env, "initialized"), admin),
-            (token_contract, referral_contract, leaderboard_contract, xlm_sac),
+            (
+                token_contract,
+                referral_contract,
+                leaderboard_contract,
+                xlm_sac,
+            ),
         );
         Ok(())
     }
@@ -398,10 +405,8 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .set(&DataKey::PendingConfig, &pending);
-        env.events().publish(
-            (Symbol::new(&env, "cfg_req"), caller),
-            pending,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "cfg_req"), caller), pending);
         Ok(())
     }
 
@@ -422,10 +427,8 @@ impl PredictionMarketContract {
         env.storage()
             .instance()
             .set(&DataKey::PendingConfig, &pending);
-        env.events().publish(
-            (Symbol::new(&env, "cfg_ok"), caller),
-            count,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "cfg_ok"), caller), count);
         Ok(count)
     }
 
@@ -474,10 +477,8 @@ impl PredictionMarketContract {
             (Symbol::new(&env, "cfg_act"), caller.clone()),
             activated.clone(),
         );
-        env.events().publish(
-            (Symbol::new(&env, "config_changed"), caller),
-            activated,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "config_changed"), caller), activated);
         Ok(())
     }
 
@@ -489,10 +490,8 @@ impl PredictionMarketContract {
             return Err(MarketError::NoConfigChange);
         }
         env.storage().instance().remove(&DataKey::PendingConfig);
-        env.events().publish(
-            (Symbol::new(&env, "cfg_can"), caller),
-            1_u32,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "cfg_can"), caller), 1_u32);
         Ok(())
     }
 
@@ -617,7 +616,8 @@ impl PredictionMarketContract {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "paused"), admin), true);
+        env.events()
+            .publish((Symbol::new(&env, "paused"), admin), true);
         Ok(())
     }
 
@@ -625,7 +625,8 @@ impl PredictionMarketContract {
         Self::require_admin(&env, &admin)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "unpaused"), admin), true);
+        env.events()
+            .publish((Symbol::new(&env, "unpaused"), admin), true);
         Ok(())
     }
 
@@ -761,7 +762,11 @@ impl PredictionMarketContract {
             .set(&DataKey::MarketCount, &market_id);
 
         env.events().publish(
-            (Symbol::new(&env, "market_created"), market.creator.clone(), market_id),
+            (
+                Symbol::new(&env, "market_created"),
+                market.creator.clone(),
+                market_id,
+            ),
             (market.category.clone(), market.end_time),
         );
         Ok(market_id)
@@ -977,15 +982,16 @@ impl PredictionMarketContract {
             let mut principal: i128 = 0;
             for i in 0..bettors {
                 let slot_key = DataKey::BettorAt(market_id, i);
-                let bettor: Address =
-                    if let Some(a) = env.storage().persistent().get(&slot_key) {
-                        a
-                    } else {
-                        continue;
-                    };
+                let bettor: Address = if let Some(a) = env.storage().persistent().get(&slot_key) {
+                    a
+                } else {
+                    continue;
+                };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
-                if let Some(entry) =
-                    env.storage().persistent().get::<DataKey, BetEntry>(&bet_key)
+                if let Some(entry) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, BetEntry>(&bet_key)
                 {
                     if entry.net > 0 {
                         principal += entry.net;
@@ -1035,14 +1041,17 @@ impl PredictionMarketContract {
 
             for i in 0..bettors {
                 let slot_key = DataKey::BettorAt(market_id, i);
-                let bettor: Address =
-                    if let Some(a) = env.storage().persistent().get(&slot_key) {
-                        a
-                    } else {
-                        continue;
-                    };
+                let bettor: Address = if let Some(a) = env.storage().persistent().get(&slot_key) {
+                    a
+                } else {
+                    continue;
+                };
                 let bet_key = DataKey::Bet(market_id, bettor.clone());
-                if let Some(entry) = env.storage().persistent().get::<DataKey, BetEntry>(&bet_key) {
+                if let Some(entry) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, BetEntry>(&bet_key)
+                {
                     if entry.is_yes == outcome {
                         let payout = (entry.net * total_pool) / winning_side;
                         let payout_key = DataKey::Payout(market_id, bettor.clone());
@@ -1197,7 +1206,11 @@ impl PredictionMarketContract {
         let net_pool = market.total_yes + market.total_no;
         let pool_fees = net_pool * PLATFORM_FEE_BPS / NET_NUMERATOR;
         let ledger = Self::market_fee_balance(&env, market_id);
-        let reclaim = if pool_fees < ledger { pool_fees } else { ledger };
+        let reclaim = if pool_fees < ledger {
+            pool_fees
+        } else {
+            ledger
+        };
         if reclaim > 0 {
             Self::debit_market_fees(&env, market_id, reclaim);
         }
@@ -1250,10 +1263,8 @@ impl PredictionMarketContract {
             &gross,
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "cancel_refund"), user, market_id),
-            gross,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "cancel_refund"), user, market_id), gross);
         Ok(gross)
     }
 
@@ -1397,7 +1408,11 @@ impl PredictionMarketContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "fees_withdrawn"), caller, recipient.clone()),
+            (
+                Symbol::new(&env, "fees_withdrawn"),
+                caller,
+                recipient.clone(),
+            ),
             cap,
         );
         Ok(cap)
@@ -1490,7 +1505,11 @@ impl PredictionMarketContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "fees_withdrawn"), caller, req.recipient.clone()),
+            (
+                Symbol::new(&env, "fees_withdrawn"),
+                caller,
+                req.recipient.clone(),
+            ),
             req.amount,
         );
         Ok(req.amount)
@@ -1510,10 +1529,8 @@ impl PredictionMarketContract {
             return Err(MarketError::NoWithdrawalRequest);
         }
         env.storage().persistent().remove(&key);
-        env.events().publish(
-            (Symbol::new(&env, "withdraw_cancelled"), admin),
-            caller,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "withdraw_cancelled"), admin), caller);
         Ok(())
     }
 
@@ -1636,11 +1653,7 @@ impl PredictionMarketContract {
     /// Permissionless migration: bump existing markets in
     /// `[start_id, start_id + limit)`. After a WASM upgrade this is how
     /// pre-existing entries get a fresh TTL without waiting for a user claim.
-    pub fn refresh_markets(
-        env: Env,
-        start_id: u64,
-        limit: u32,
-    ) -> Result<u32, MarketError> {
+    pub fn refresh_markets(env: Env, start_id: u64, limit: u32) -> Result<u32, MarketError> {
         let count: u64 = env
             .storage()
             .instance()
@@ -1795,7 +1808,11 @@ impl PredictionMarketContract {
 
         let mut remaining = amount;
         let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
-        let take_legacy = if remaining < legacy { remaining } else { legacy };
+        let take_legacy = if remaining < legacy {
+            remaining
+        } else {
+            legacy
+        };
         if take_legacy > 0 {
             Self::debit_market_fees(env, LEGACY_MARKET_ID, take_legacy);
             remaining -= take_legacy;
