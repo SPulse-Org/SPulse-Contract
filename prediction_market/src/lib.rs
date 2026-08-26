@@ -147,7 +147,6 @@ pub enum DataKey {
     BettorAt(u64, u32),
     Resolver(Address),
     FeeRecipient(Address),
-    HasReferrer(Address),
     RateWindow, // packed u64: high32=window_start_hi, low32=count
     // ── Settlement-time payouts (issue #2) ───────────────────────────────
     Payout(u64, Address), // i128 — exact payout computed at resolve time
@@ -897,10 +896,6 @@ impl PredictionMarketContract {
             .persistent()
             .extend_ttl(&mkt_key, TTL_BUMP, TTL_HIGH);
 
-        // ── HasReferrer cache write ───────────────────────────────────────
-        let hr_key = DataKey::HasReferrer(user.clone());
-        let cached: Option<bool> = env.storage().persistent().get(&hr_key);
-
         // ── External calls (issue 89: after ALL state writes) ─────────────
 
         // ── XLM transfer user → this contract ────────────────────────────
@@ -908,10 +903,8 @@ impl PredictionMarketContract {
         let this = env.current_contract_address();
         xlm.transfer(&user, &this, &amount);
 
-        // ── Referral (skip if cached no-referrer) ─────────────────────────
-        let _paid_referrer = if cached == Some(false) {
-            false
-        } else {
+        // ── Referral (always check referral contract directly) ────────────
+        let _paid_referrer = {
             Self::require_compatible_referral(&env, &cfg.referral)?;
 
             // Resolve the bettor's referrer and prove it is a registered
@@ -924,44 +917,7 @@ impl PredictionMarketContract {
                 &Symbol::new(&env, "get_referrer"),
                 vec![&env, user.clone().into_val(&env)],
             );
-            let registered = match &referrer {
-                Some(ref_addr) => env.invoke_contract::<bool>(
-                    &cfg.referral,
-                    &Symbol::new(&env, "is_registered_referrer"),
-                    vec![&env, ref_addr.into_val(&env)],
-                ),
-                None => false,
-            };
-
-            if !registered {
-                Self::credit_market_fees(&env, market_id, referral_fee);
-                if cached.is_none() {
-                    env.storage().persistent().set(&hr_key, &false);
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
-                }
-                false
-            } else {
-                xlm.transfer(&this, &cfg.referral, &referral_fee);
-                let result: bool = env.invoke_contract(
-                    &cfg.referral,
-                    &Symbol::new(&env, "credit"),
-                    vec![
-                        &env,
-                        this.clone().into_val(&env),
-                        user.clone().into_val(&env),
-                        referral_fee.into_val(&env),
-                    ],
-                );
-                if cached.is_none() {
-                    env.storage().persistent().set(&hr_key, &result);
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&hr_key, TTL_BUMP, TTL_HIGH);
-                }
-                result
-            }
+            result
         };
 
         // ── Release reentrancy lock ──────────────────────────────────────
