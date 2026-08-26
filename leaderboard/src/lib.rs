@@ -202,6 +202,9 @@ impl LeaderboardContract {
         Self::write_token_contract(&env, &admin, &token)
     }
 
+    // ── Bet-settlement path ───────────────────────────────────────────────────
+
+    /// Called by the market contract after a bet is settled.
     /// The cross-contract ABI version this deployment implements (issue #84).
     pub fn interface_version(_env: Env) -> u32 {
         INTERFACE_VERSION
@@ -336,6 +339,16 @@ impl LeaderboardContract {
             Some(p) => p,
             None => return Ok(()),
         };
+
+        // Mint tokens BEFORE removing the pending reward.  If minting fails
+        // (e.g. supply cap exceeded), the pending reward stays in storage so
+        // the user can retry once the cap is raised — their reward is never
+        // silently lost (issue #79).
+        if pending.tokens > 0 {
+            Self::mint_reward(&env, &user, pending.tokens)?;
+        }
+
+        // Now safe to consume the pending reward.
         env.storage().persistent().remove(&key);
 
         let mut s = Self::stats_for_update(&env, &user);
@@ -350,9 +363,6 @@ impl LeaderboardContract {
         Self::commit_stats(&env, &user, &s);
         Self::update_top_players(&env, user.clone(), s.points);
 
-        if pending.tokens > 0 {
-            Self::mint_reward(&env, &user, pending.tokens)?;
-        }
         env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
         Ok(())
     }
@@ -409,10 +419,12 @@ impl LeaderboardContract {
 
     /// No-op stub retained for ABI compatibility. total_bets is derived at read
     /// time, so a standalone "bet recorded" call does nothing.
+    /// No-op stub retained for ABI compatibility. total_bets is derived at read
+    /// time, so a standalone "bet recorded" call does nothing.
     pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
         Self::require_not_paused(&env)?;
         Self::require_market_contract(&env, &caller)?;
-        caller.require_auth();
+        // No-op: total_bets is derived at read time from won_bets + lost_bets + bonus_bets.
         Ok(())
     }
 
