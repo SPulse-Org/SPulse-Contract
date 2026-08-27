@@ -15,8 +15,8 @@ use soroban_sdk::{
 // market_cancelled   (admin, id)              net_pool
 // cancel_refund      (user, id)               gross
 // claim_processed    (user, id)               (is_winner, payout)
-// fees_withdrawn     (caller)                 (recipient, amount)
-// withdraw_requested (caller)                 (recipient, amount)
+// fees_withdrawn     (caller, recipient)      (amount, Vec<FeeProvenance>)
+// withdraw_requested (caller, recipient)      amount
 // withdraw_cancelled (admin)                  caller
 // config_changed     (admin)                  Config
 // paused / unpaused  (admin)                  ()
@@ -229,6 +229,15 @@ pub struct ForfeitedPool {
     pub locked_fees: i128,
     pub resolved_at: u64,
     pub frozen: bool,
+}
+
+/// Provenance of a fee withdrawal: how much was drawn from each market.
+/// Legacy fees (pre-upgrade) are reported with market_id == 0.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeProvenance {
+    pub market_id: u64,
+    pub amount: i128,
 }
 
 // ── Domain Structs ────────────────────────────────────────────────────────────
@@ -1380,7 +1389,7 @@ impl PredictionMarketContract {
             return Err(MarketError::NoFeesToWithdraw);
         }
         let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
-        Self::debit_proven_fees(&env, cap)?;
+        let provenance = Self::debit_proven_fees(&env, cap)?;
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         token::Client::new(&env, &cfg.xlm_sac).transfer(
@@ -1391,7 +1400,7 @@ impl PredictionMarketContract {
 
         env.events().publish(
             (Symbol::new(&env, "fees_withdrawn"), caller, recipient.clone()),
-            cap,
+            (cap, provenance),
         );
         Ok(cap)
     }
@@ -1472,7 +1481,7 @@ impl PredictionMarketContract {
         // Debit the per-market / legacy ledger so the cached sum stays in
         // lockstep. Effects before interaction so a reentrant recipient
         // cannot re-read stale accumulator state.
-        Self::debit_proven_fees(&env, req.amount)?;
+        let provenance = Self::debit_proven_fees(&env, req.amount)?;
         env.storage().persistent().remove(&key);
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
@@ -1484,7 +1493,7 @@ impl PredictionMarketContract {
 
         env.events().publish(
             (Symbol::new(&env, "fees_withdrawn"), caller, req.recipient.clone()),
-            req.amount,
+            (req.amount, provenance),
         );
         Ok(req.amount)
     }
@@ -1597,6 +1606,17 @@ impl PredictionMarketContract {
             .instance()
             .get(&DataKey::LegacyFees)
             .unwrap_or(0)
+    }
+
+    /// Preview which markets a withdrawal of `amount` would draw from, without
+    /// debiting. Returns a vec of (market_id, amount) pairs in drain order
+    /// (legacy first, then newest-to-oldest). Useful for indexers and UIs
+    /// that want to show fee provenance before a withdrawal executes.
+    pub fn get_withdrawal_provenance(
+        env: Env,
+        amount: i128,
+    ) -> Result<Vec<FeeProvenance>, MarketError> {
+        Self::preview_fee_provenance(&env, amount)
     }
 
     /// Permissionless one-shot: snapshot the pre-upgrade global scalar into
@@ -1767,7 +1787,11 @@ impl PredictionMarketContract {
 
     /// Drain LegacyFees first, then per-market balances from newest to oldest,
     /// keeping AccumulatedFees in lockstep. Used by withdraw paths.
-    fn debit_proven_fees(env: &Env, amount: i128) -> Result<(), MarketError> {
+    /// Returns the provenance: which markets were debited and how much.
+    fn debit_proven_fees(
+        env: &Env,
+        amount: i128,
+    ) -> Result<Vec<FeeProvenance>, MarketError> {
         Self::ensure_fee_ledger_migrated(env);
         if amount <= 0 {
             return Err(MarketError::InvalidAmount);
@@ -1781,11 +1805,16 @@ impl PredictionMarketContract {
             return Err(MarketError::WithdrawalTooLarge);
         }
 
+        let mut provenance: Vec<FeeProvenance> = Vec::new(env);
         let mut remaining = amount;
         let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
         let take_legacy = if remaining < legacy { remaining } else { legacy };
         if take_legacy > 0 {
             Self::debit_market_fees(env, LEGACY_MARKET_ID, take_legacy);
+            provenance.push_back(FeeProvenance {
+                market_id: LEGACY_MARKET_ID,
+                amount: take_legacy,
+            });
             remaining -= take_legacy;
         }
         if remaining > 0 {
@@ -1800,6 +1829,10 @@ impl PredictionMarketContract {
                 if mf > 0 {
                     let take = if remaining < mf { remaining } else { mf };
                     Self::debit_market_fees(env, id, take);
+                    provenance.push_back(FeeProvenance {
+                        market_id: id,
+                        amount: take,
+                    });
                     remaining -= take;
                 }
                 id -= 1;
@@ -1808,7 +1841,60 @@ impl PredictionMarketContract {
         if remaining > 0 {
             return Err(MarketError::WithdrawalTooLarge);
         }
-        Ok(())
+        Ok(provenance)
+    }
+
+    /// Preview the provenance of a withdrawal without debiting.
+    /// Returns which markets would be debited and how much.
+    fn preview_fee_provenance(env: &Env, amount: i128) -> Result<Vec<FeeProvenance>, MarketError> {
+        Self::ensure_fee_ledger_migrated(env);
+        if amount <= 0 {
+            return Err(MarketError::InvalidAmount);
+        }
+        let acc: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccumulatedFees)
+            .unwrap_or(0);
+        if amount > acc {
+            return Err(MarketError::WithdrawalTooLarge);
+        }
+
+        let mut provenance: Vec<FeeProvenance> = Vec::new(env);
+        let mut remaining = amount;
+        let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
+        let take_legacy = if remaining < legacy { remaining } else { legacy };
+        if take_legacy > 0 {
+            provenance.push_back(FeeProvenance {
+                market_id: LEGACY_MARKET_ID,
+                amount: take_legacy,
+            });
+            remaining -= take_legacy;
+        }
+        if remaining > 0 {
+            let count: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MarketCount)
+                .unwrap_or(0);
+            let mut id = count;
+            while remaining > 0 && id > 0 {
+                let mf = Self::market_fee_balance(env, id);
+                if mf > 0 {
+                    let take = if remaining < mf { remaining } else { mf };
+                    provenance.push_back(FeeProvenance {
+                        market_id: id,
+                        amount: take,
+                    });
+                    remaining -= take;
+                }
+                id -= 1;
+            }
+        }
+        if remaining > 0 {
+            return Err(MarketError::WithdrawalTooLarge);
+        }
+        Ok(provenance)
     }
 
     fn sac_sentinel(env: &Env) -> BytesN<32> {
