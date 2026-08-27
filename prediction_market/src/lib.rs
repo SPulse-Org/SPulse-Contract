@@ -125,6 +125,9 @@ pub enum MarketError {
     /// Registered resolver attempted to bet, or tried to resolve a market they
     /// have a stake in (issue #3 collusion guard).
     ResolverConflict = 40,
+    /// Fee recipient attempted to withdraw from a market they are not
+    /// authorized for (issue #57 per-market segregation).
+    UnauthorizedMarket = 41,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -144,7 +147,7 @@ pub enum DataKey {
     BettorAt(u64, u32),
     Resolver(Address),
     FeeRecipient(Address),
-    HasReferrer(Address),
+    AuthorizedMarkets(Address), // recipient -> Vec<u64>: markets they can withdraw from
     RateWindow, // packed u64: high32=window_start_hi, low32=count
     // ── Settlement-time payouts (issue #2) ───────────────────────────────
     Payout(u64, Address), // i128 — exact payout computed at resolve time
@@ -212,11 +215,13 @@ pub struct BetEntry {
 }
 
 // ── WithdrawalRequest: capped, recipient-validated, timelocked (issue #12) ──
+/// Per-market segregation: market_id == 0 means all markets authorized.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalRequest {
     pub recipient: Address,
     pub amount: i128,
+    pub market_id: u64,
     pub requested_at: u64,
 }
 
@@ -1381,28 +1386,28 @@ impl PredictionMarketContract {
     // (per-market ledger + pre-upgrade LegacyFees). Empty-side principal
     // never enters this pot. Admin instant withdraw is capped per call
     // (MAX_WITHDRAWAL_BPS) like the timelocked recipient path.
+    // Per-market segregation: recipients can only withdraw from authorized markets.
 
     pub fn withdraw_fees(
         env: Env,
         caller: Address,
         recipient: Address,
+        market_id: u64,
     ) -> Result<i128, MarketError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
         Self::require_valid_fee_recipient(&env, &caller, &recipient)?;
 
+        Self::ensure_market_authorized(&env, &recipient, market_id)?;
+
         Self::ensure_fee_ledger_migrated(&env);
-        let fees: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccumulatedFees)
-            .unwrap_or(0);
+        let fees = Self::get_withdrawable_fees_for_market(&env, market_id);
         if fees <= 0 {
             return Err(MarketError::NoFeesToWithdraw);
         }
         let cap = fees * MAX_WITHDRAWAL_BPS / BPS_DENOM;
-        let provenance = Self::debit_proven_fees(&env, cap)?;
+        let provenance = Self::debit_proven_fees(&env, market_id, cap)?;
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
         token::Client::new(&env, &cfg.xlm_sac).transfer(
@@ -1413,7 +1418,7 @@ impl PredictionMarketContract {
 
         env.events().publish(
             (Symbol::new(&env, "fees_withdrawn"), caller, recipient.clone()),
-            (cap, provenance),
+            (market_id, cap, provenance),
         );
         Ok(cap)
     }
@@ -1421,16 +1426,20 @@ impl PredictionMarketContract {
     /// Issue #12: request a capped, timelocked withdrawal. The payout lands
     /// only after WITHDRAW_DELAY_SECS via execute_withdraw_fees, and the admin
     /// can cancel the request before then (see cancel_withdrawal_request).
+    /// Per-market segregation: recipients can only withdraw from authorized markets.
     pub fn request_withdraw_fees(
         env: Env,
         caller: Address,
         recipient: Address,
+        market_id: u64,
         amount: i128,
     ) -> Result<(), MarketError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
         Self::require_admin_or_fee_recipient(&env, &caller)?;
         Self::require_valid_fee_recipient(&env, &caller, &recipient)?;
+
+        Self::ensure_market_authorized(&env, &recipient, market_id)?;
 
         if amount <= 0 {
             return Err(MarketError::InvalidAmount);
@@ -1441,11 +1450,7 @@ impl PredictionMarketContract {
         }
 
         Self::ensure_fee_ledger_migrated(&env);
-        let fees: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccumulatedFees)
-            .unwrap_or(0);
+        let fees = Self::get_withdrawable_fees_for_market(&env, market_id);
         if amount > fees {
             return Err(MarketError::WithdrawalTooLarge);
         }
@@ -1461,6 +1466,7 @@ impl PredictionMarketContract {
             &WithdrawalRequest {
                 recipient: recipient.clone(),
                 amount,
+                market_id,
                 requested_at: env.ledger().timestamp(),
             },
         );
@@ -1469,13 +1475,14 @@ impl PredictionMarketContract {
             .extend_ttl(&key, TTL_BUMP, TTL_HIGH);
         env.events().publish(
             (Symbol::new(&env, "withdraw_requested"), caller, recipient),
-            amount,
+            (market_id, amount),
         );
         Ok(())
     }
 
     /// Issue #12: pay out a matured withdrawal request. Reverts while the
     /// WITHDRAW_DELAY_SECS timelock is still running.
+    /// Per-market segregation: debits from the specific market's ledger.
     pub fn execute_withdraw_fees(env: Env, caller: Address) -> Result<i128, MarketError> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
@@ -1494,7 +1501,7 @@ impl PredictionMarketContract {
         // Debit the per-market / legacy ledger so the cached sum stays in
         // lockstep. Effects before interaction so a reentrant recipient
         // cannot re-read stale accumulator state.
-        let provenance = Self::debit_proven_fees(&env, req.amount)?;
+        let provenance = Self::debit_proven_fees(&env, req.market_id, req.amount)?;
         env.storage().persistent().remove(&key);
 
         let cfg: Config = env.storage().instance().get(&DataKey::Cfg).unwrap();
@@ -1506,7 +1513,7 @@ impl PredictionMarketContract {
 
         env.events().publish(
             (Symbol::new(&env, "fees_withdrawn"), caller, req.recipient.clone()),
-            (req.amount, provenance),
+            (req.market_id, req.amount, provenance),
         );
         Ok(req.amount)
     }
@@ -1605,6 +1612,74 @@ impl PredictionMarketContract {
             .unwrap_or(0)
     }
 
+    /// Authorize a fee recipient to withdraw fees from specific markets.
+    /// Admin only. If no markets are specified, recipient is authorized for all.
+    pub fn authorize_markets(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        market_ids: Vec<u64>,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+        Self::require_valid_fee_recipient(&env, &admin, &recipient)?;
+
+        let was_registered = env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::FeeRecipient(recipient.clone()))
+            .unwrap_or(false);
+        if !was_registered && !market_ids.is_empty() {
+            env.storage()
+                .persistent()
+                .set(&DataKey::FeeRecipient(recipient.clone()), &true);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuthorizedMarkets(recipient.clone()), &market_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AuthorizedMarkets(recipient), TTL_BUMP, TTL_HIGH);
+        Ok(())
+    }
+
+    /// Deauthorize a fee recipient from withdrawing fees from specific markets.
+    /// Admin only.
+    pub fn deauthorize_markets(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), MarketError> {
+        Self::require_admin(&env, &admin)?;
+        admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AuthorizedMarkets(recipient.clone()));
+        Ok(())
+    }
+
+    /// Get the list of markets a recipient is authorized to withdraw from.
+    /// Returns empty Vec if not explicitly authorized (can withdraw from all).
+    pub fn get_authorized_markets(env: Env, recipient: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AuthorizedMarkets(recipient))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Check if a recipient is authorized to withdraw from a specific market.
+    /// Returns true if no specific authorization is set (can withdraw from all).
+    pub fn is_authorized_for_market(env: Env, recipient: Address, market_id: u64) -> bool {
+        let authorized: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuthorizedMarkets(recipient))
+            .unwrap_or(Vec::new(&env));
+        authorized.is_empty() || authorized.contains(&market_id)
+    }
+
     /// Genuine platform fees attributed to `market_id`. Independent of the
     /// cached global sum, so a cancel or withdraw on another market cannot
     /// change this value.
@@ -1625,11 +1700,13 @@ impl PredictionMarketContract {
     /// debiting. Returns a vec of (market_id, amount) pairs in drain order
     /// (legacy first, then newest-to-oldest). Useful for indexers and UIs
     /// that want to show fee provenance before a withdrawal executes.
+    /// market_id == 0 means all markets; otherwise only that market.
     pub fn get_withdrawal_provenance(
         env: Env,
+        market_id: u64,
         amount: i128,
     ) -> Result<Vec<FeeProvenance>, MarketError> {
-        Self::preview_fee_provenance(&env, amount)
+        Self::preview_fee_provenance(&env, market_id, amount)
     }
 
     /// Permissionless one-shot: snapshot the pre-upgrade global scalar into
@@ -1798,59 +1875,77 @@ impl PredictionMarketContract {
             .set(&DataKey::AccumulatedFees, &next_acc);
     }
 
-    /// Drain LegacyFees first, then per-market balances from newest to oldest,
+    /// Drain fees from a specific market (or all markets if market_id == 0),
     /// keeping AccumulatedFees in lockstep. Used by withdraw paths.
     /// Returns the provenance: which markets were debited and how much.
     fn debit_proven_fees(
         env: &Env,
+        market_id: u64,
         amount: i128,
     ) -> Result<Vec<FeeProvenance>, MarketError> {
         Self::ensure_fee_ledger_migrated(env);
         if amount <= 0 {
             return Err(MarketError::InvalidAmount);
         }
-        let acc: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccumulatedFees)
-            .unwrap_or(0);
-        if amount > acc {
-            return Err(MarketError::WithdrawalTooLarge);
-        }
 
         let mut provenance: Vec<FeeProvenance> = Vec::new(env);
         let mut remaining = amount;
-        let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
-        let take_legacy = if remaining < legacy { remaining } else { legacy };
-        if take_legacy > 0 {
-            Self::debit_market_fees(env, LEGACY_MARKET_ID, take_legacy);
-            provenance.push_back(FeeProvenance {
-                market_id: LEGACY_MARKET_ID,
-                amount: take_legacy,
-            });
-            remaining -= take_legacy;
-        }
-        if remaining > 0 {
-            let count: u64 = env
+
+        if market_id == 0 {
+            // Admin path: drain LegacyFees first, then per-market from newest to oldest
+            let acc: i128 = env
                 .storage()
                 .instance()
-                .get(&DataKey::MarketCount)
+                .get(&DataKey::AccumulatedFees)
                 .unwrap_or(0);
-            let mut id = count;
-            while remaining > 0 && id > 0 {
-                let mf = Self::market_fee_balance(env, id);
-                if mf > 0 {
-                    let take = if remaining < mf { remaining } else { mf };
-                    Self::debit_market_fees(env, id, take);
-                    provenance.push_back(FeeProvenance {
-                        market_id: id,
-                        amount: take,
-                    });
-                    remaining -= take;
-                }
-                id -= 1;
+            if amount > acc {
+                return Err(MarketError::WithdrawalTooLarge);
             }
+            let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
+            let take_legacy = if remaining < legacy { remaining } else { legacy };
+            if take_legacy > 0 {
+                Self::debit_market_fees(env, LEGACY_MARKET_ID, take_legacy);
+                provenance.push_back(FeeProvenance {
+                    market_id: LEGACY_MARKET_ID,
+                    amount: take_legacy,
+                });
+                remaining -= take_legacy;
+            }
+            if remaining > 0 {
+                let count: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MarketCount)
+                    .unwrap_or(0);
+                let mut id = count;
+                while remaining > 0 && id > 0 {
+                    let mf = Self::market_fee_balance(env, id);
+                    if mf > 0 {
+                        let take = if remaining < mf { remaining } else { mf };
+                        Self::debit_market_fees(env, id, take);
+                        provenance.push_back(FeeProvenance {
+                            market_id: id,
+                            amount: take,
+                        });
+                        remaining -= take;
+                    }
+                    id -= 1;
+                }
+            }
+        } else {
+            // Per-market path: only debit from the specified market
+            let mf = Self::market_fee_balance(env, market_id);
+            if amount > mf {
+                return Err(MarketError::WithdrawalTooLarge);
+            }
+            Self::debit_market_fees(env, market_id, amount);
+            provenance.push_back(FeeProvenance {
+                market_id,
+                amount,
+            });
+            remaining = 0;
         }
+
         if remaining > 0 {
             return Err(MarketError::WithdrawalTooLarge);
         }
@@ -1859,55 +1954,108 @@ impl PredictionMarketContract {
 
     /// Preview the provenance of a withdrawal without debiting.
     /// Returns which markets would be debited and how much.
-    fn preview_fee_provenance(env: &Env, amount: i128) -> Result<Vec<FeeProvenance>, MarketError> {
+    /// market_id == 0 means all markets; otherwise only that market.
+    fn preview_fee_provenance(
+        env: &Env,
+        market_id: u64,
+        amount: i128,
+    ) -> Result<Vec<FeeProvenance>, MarketError> {
         Self::ensure_fee_ledger_migrated(env);
         if amount <= 0 {
             return Err(MarketError::InvalidAmount);
         }
-        let acc: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccumulatedFees)
-            .unwrap_or(0);
-        if amount > acc {
-            return Err(MarketError::WithdrawalTooLarge);
-        }
 
         let mut provenance: Vec<FeeProvenance> = Vec::new(env);
         let mut remaining = amount;
-        let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
-        let take_legacy = if remaining < legacy { remaining } else { legacy };
-        if take_legacy > 0 {
-            provenance.push_back(FeeProvenance {
-                market_id: LEGACY_MARKET_ID,
-                amount: take_legacy,
-            });
-            remaining -= take_legacy;
-        }
-        if remaining > 0 {
-            let count: u64 = env
+
+        if market_id == 0 {
+            let acc: i128 = env
                 .storage()
                 .instance()
-                .get(&DataKey::MarketCount)
+                .get(&DataKey::AccumulatedFees)
                 .unwrap_or(0);
-            let mut id = count;
-            while remaining > 0 && id > 0 {
-                let mf = Self::market_fee_balance(env, id);
-                if mf > 0 {
-                    let take = if remaining < mf { remaining } else { mf };
-                    provenance.push_back(FeeProvenance {
-                        market_id: id,
-                        amount: take,
-                    });
-                    remaining -= take;
-                }
-                id -= 1;
+            if amount > acc {
+                return Err(MarketError::WithdrawalTooLarge);
             }
+            let legacy = Self::market_fee_balance(env, LEGACY_MARKET_ID);
+            let take_legacy = if remaining < legacy { remaining } else { legacy };
+            if take_legacy > 0 {
+                provenance.push_back(FeeProvenance {
+                    market_id: LEGACY_MARKET_ID,
+                    amount: take_legacy,
+                });
+                remaining -= take_legacy;
+            }
+            if remaining > 0 {
+                let count: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MarketCount)
+                    .unwrap_or(0);
+                let mut id = count;
+                while remaining > 0 && id > 0 {
+                    let mf = Self::market_fee_balance(env, id);
+                    if mf > 0 {
+                        let take = if remaining < mf { remaining } else { mf };
+                        provenance.push_back(FeeProvenance {
+                            market_id: id,
+                            amount: take,
+                        });
+                        remaining -= take;
+                    }
+                    id -= 1;
+                }
+            }
+        } else {
+            let mf = Self::market_fee_balance(env, market_id);
+            if amount > mf {
+                return Err(MarketError::WithdrawalTooLarge);
+            }
+            provenance.push_back(FeeProvenance {
+                market_id,
+                amount,
+            });
+            remaining = 0;
         }
+
         if remaining > 0 {
             return Err(MarketError::WithdrawalTooLarge);
         }
         Ok(provenance)
+    }
+
+    /// Ensure a recipient is authorized to withdraw from the given market.
+    /// market_id == 0 is always allowed (admin can withdraw from all).
+    fn ensure_market_authorized(
+        env: &Env,
+        recipient: &Address,
+        market_id: u64,
+    ) -> Result<(), MarketError> {
+        if market_id == 0 {
+            return Ok(());
+        }
+        let authorized: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AuthorizedMarkets(recipient.clone()))
+            .unwrap_or(Vec::new(env));
+        if !authorized.is_empty() && !authorized.contains(&market_id) {
+            return Err(MarketError::UnauthorizedMarket);
+        }
+        Ok(())
+    }
+
+    /// Get the withdrawable fees for a specific market.
+    /// market_id == 0 returns the global AccumulatedFees.
+    fn get_withdrawable_fees_for_market(env: &Env, market_id: u64) -> i128 {
+        if market_id == 0 {
+            env.storage()
+                .instance()
+                .get(&DataKey::AccumulatedFees)
+                .unwrap_or(0)
+        } else {
+            Self::market_fee_balance(env, market_id)
+        }
     }
 
     fn sac_sentinel(env: &Env) -> BytesN<32> {
