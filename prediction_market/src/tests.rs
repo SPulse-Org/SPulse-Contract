@@ -80,7 +80,7 @@ fn setup() -> TestSetup {
     // Lever G: the leaderboard now mints PULSE internally (one cross-call from
     // market/referral instead of two). It must know the token AND be authorized
     // as a minter. This mirrors the exact mainnet upgrade sequence.
-    leaderboard_client.set_token_contract(&admin, &token_id, &1_u32);
+    leaderboard_client.set_token_contract(&admin, &token_id, &pulse_token::INTERFACE_VERSION);
     token_client.set_minter(&leaderboard_id);
     // Legacy minter auths kept harmless (market/referral no longer mint directly).
     token_client.set_minter(&market_id);
@@ -986,7 +986,8 @@ fn test_claim_winner() {
     assert_eq!(t.xlm.balance(&bob), bob_pre_claim);
     let stats = t.leaderboard_client.get_stats(&bob);
     assert_eq!(stats.lost_bets, 1);
-    assert_eq!(t.token_client.balance(&bob), 2_0000000);
+    // No LOSE_TOKENS consolation prize for a loss (issue #24).
+    assert_eq!(t.token_client.balance(&bob), 0);
 }
 
 // ── 23. Reject double claim ───────────────────────────────────────────────────
@@ -1771,14 +1772,17 @@ fn test_empty_side_resolution_pool_to_fees() {
     assert_eq!(withdrawn, fees_before);
     assert_eq!(t.xlm.balance(&treasury), before + fees_before);
 
-    // Alice claims her net principal plus lose-tier PULSE / points
+    // Alice claims her net principal. Issue #24: not a real win, so no
+    // WIN_TOKENS/WIN_POINTS -- and no LOSE_TOKENS consolation either (see
+    // prediction_market/src/lib.rs's comment by the removed LOSE_TOKENS
+    // constant), plus a LOSE_POINTS *penalty* rather than the pre-fix credit.
     let alice_xlm_before = t.xlm.balance(&alice);
     t.client.claim(&alice, &id);
     let bet = t.client.get_bet(&id, &alice);
     assert!(bet.claimed);
     assert_eq!(t.xlm.balance(&alice), alice_xlm_before + 98_0000000);
-    assert_eq!(t.token_client.balance(&alice), 2_0000000); // LOSE_TOKENS
-    assert_eq!(t.leaderboard_client.get_points(&alice), 10); // LOSE_POINTS
+    assert_eq!(t.token_client.balance(&alice), 0);
+    assert_eq!(t.leaderboard_client.get_points(&alice), 0); // saturates at 0, was never credited
 }
 // ── 42. Cancel accumulates fees on multiple bets correctly ────────────────────
 
@@ -2027,12 +2031,16 @@ fn test_e2e_full_inter_contract_flow() {
     assert_eq!(t.leaderboard_client.get_points(&alice_user), 35); // 5 welcome + 30 win
     assert_eq!(t.token_client.balance(&alice_user), 11_0000000); // 1 welcome + 10 win
 
-    // Bob claims as loser
+    // Bob claims as loser. Issue #24: a loss costs points (penalize) rather
+    // than awarding them, with no token consolation -- but the loss is still
+    // recorded as activity (lost_bets), via the same add_pts(0, false) call
+    // every other outcome already used.
     let bob_xlm_before = t.xlm.balance(&bob);
     t.client.claim(&bob, &market_id);
     assert_eq!(t.xlm.balance(&bob), bob_xlm_before);
-    assert_eq!(t.leaderboard_client.get_points(&bob), 10);
-    assert_eq!(t.token_client.balance(&bob), 2_0000000);
+    assert_eq!(t.leaderboard_client.get_points(&bob), 0); // saturates at 0, was never credited
+    assert_eq!(t.token_client.balance(&bob), 0);
+    assert_eq!(t.leaderboard_client.get_stats(&bob).lost_bets, 1);
 
     // Fee withdrawal to a registered treasury address
     let treasury = Address::generate(&t.env);
@@ -2604,6 +2612,8 @@ fn activate_config(
     referral: &Address,
     leaderboard: &Address,
     xlm_sac: &Address,
+    expected_referral_version: &u32,
+    expected_leaderboard_version: &u32,
 ) {
     t.client.set_config(
         &t.admin,
@@ -2612,8 +2622,8 @@ fn activate_config(
             referral: referral.clone(),
             leaderboard: leaderboard.clone(),
             xlm_sac: xlm_sac.clone(),
-            expected_referral_version: 1,
-            expected_leaderboard_version: 1,
+            expected_referral_version: *expected_referral_version,
+            expected_leaderboard_version: *expected_leaderboard_version,
         },
     );
     advance_time(&t.env, CONFIG_DELAY_SECS);
@@ -2639,6 +2649,8 @@ fn test_claim_rejects_incompatible_leaderboard() {
         &cfg.referral,
         &fake_leaderboard,
         &cfg.xlm_sac,
+        &cfg.expected_referral_version,
+        &cfg.expected_leaderboard_version,
     );
 
     t.client.claim(&user, &id);
@@ -2682,6 +2694,8 @@ fn test_matching_version_does_not_guarantee_claim_succeeds() {
         &cfg.referral,
         &fake_leaderboard,
         &cfg.xlm_sac,
+        &cfg.expected_referral_version,
+        &cfg.expected_leaderboard_version,
     );
 
     // require_compatible_leaderboard passes (version 1 == version 1), then
@@ -2953,8 +2967,8 @@ fn test_set_config_is_timelocked() {
             referral: new_referral.clone(),
             leaderboard: new_leaderboard.clone(),
             xlm_sac: new_xlm.clone(),
-            expected_referral_version: 1,
-            expected_leaderboard_version: 1,
+            expected_referral_version: referral_registry::INTERFACE_VERSION,
+            expected_leaderboard_version: leaderboard::INTERFACE_VERSION,
         },
     );
 
@@ -3217,10 +3231,14 @@ fn test_set_config_non_governor_rejected() {
 }
 
 fn last_event_name(env: &Env) -> Symbol {
+    // soroban-sdk 26's `events().all()` returns a `ContractEvents` exposed as
+    // an XDR slice, not an indexable Vec<(Address, Vec<Val>, Val)> the way an
+    // older SDK did -- same shape as leaderboard's penalty_tests.rs.
     let events = env.events().all();
     let emitted = events.events();
-    let soroban_sdk::xdr::ContractEventBody::V0(body) = &emitted.last().unwrap().body;
-    let topic0: Val = Val::try_from_val(env, &body.topics[0]).unwrap();
+    let last = emitted.last().expect("no event was emitted");
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &last.body;
+    let topic0 = Val::try_from_val(env, &body.topics[0]).unwrap();
     Symbol::try_from_val(env, &topic0).unwrap()
 }
 
@@ -3558,7 +3576,55 @@ fn test_two_sided_loser_does_not_receive_xlm_on_claim() {
         bob_before,
         "loser must not receive XLM"
     );
-    assert_eq!(t.token_client.balance(&bob), 2_0000000);
+    assert_eq!(t.token_client.balance(&bob), 0);
+}
+
+// Regression test for issue #24: "losers still gain LOSE_POINTS" -- a loss
+// must cost points, not add them. Deliberately uses a player who already has
+// a positive balance from a prior win: starting from 0, "penalized down to
+// 0" and "never credited" are indistinguishable, so that alone can't prove
+// the fix. Points actually moving *down* on a loss is the whole point.
+#[test]
+fn test_loss_penalizes_existing_points_issue_24() {
+    let t = setup();
+    let alice = Address::generate(&t.env);
+    let bob = Address::generate(&t.env);
+    fund_user(&t, &alice, 500_0000000);
+    fund_user(&t, &bob, 500_0000000);
+
+    // Market 1: alice wins, banking WIN_POINTS.
+    let id1 = create_test_market(&t);
+    t.client.place_bet(&alice, &id1, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id1, &false, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id1, &true);
+    t.client.claim(&alice, &id1);
+    assert_eq!(t.leaderboard_client.get_points(&alice), 30); // WIN_POINTS
+
+    // Market 2: alice loses a genuine two-sided bet (real competition, not
+    // an empty-side edge case already covered elsewhere in this file).
+    let id2 = create_test_market(&t);
+    t.client.place_bet(&alice, &id2, &true, &100_0000000_i128);
+    t.client.place_bet(&bob, &id2, &false, &100_0000000_i128);
+    advance_time(&t.env, 3601);
+    t.client.resolve_market(&t.admin, &id2, &false);
+
+    let alice_tokens_before = t.token_client.balance(&alice);
+    t.client.claim(&alice, &id2);
+
+    // The bug this issue describes: before the fix, this loss would have
+    // pushed alice's points UP to 40 (30 + LOSE_POINTS via reward()).
+    // After the fix, it's a real penalty: 30 - LOSE_POINTS(10) = 20.
+    assert_eq!(t.leaderboard_client.get_points(&alice), 20);
+    // No token consolation prize for a loss anymore either (see the removed
+    // LOSE_TOKENS constant's comment in prediction_market/src/lib.rs).
+    assert_eq!(t.token_client.balance(&alice), alice_tokens_before);
+    // The loss is still recorded as activity, exactly like every other
+    // outcome, even though penalize() itself is deliberately
+    // activity-counter-neutral (see leaderboard's penalty_tests.rs).
+    let stats = t.leaderboard_client.get_stats(&alice);
+    assert_eq!(stats.won_bets, 1);
+    assert_eq!(stats.lost_bets, 1);
 }
 
 #[test]
@@ -4200,8 +4266,10 @@ fn test_inv_pulse_supply_tracks_rewards() {
     t.client.claim(&alice, &id);
     t.client.claim(&bob, &id);
 
-    // Total supply = winner tokens + loser tokens
-    let expected_supply = WIN_TOKENS + LOSE_TOKENS;
+    // Total supply = winner tokens only. Losers no longer mint a consolation
+    // prize (issue #24 -- LOSE_TOKENS removed, a loss now costs points via
+    // penalize() instead of paying out).
+    let expected_supply = WIN_TOKENS;
     assert_eq!(t.token_client.total_supply(), expected_supply);
 }
 
@@ -4276,8 +4344,9 @@ fn test_inv_fee_conservation() {
     assert_eq!(t.client.get_accumulated_fees(), 0);
 }
 
-/// Invariant 7: Leaderboard points are conserved across win/loss/bonus.
-/// Total points credited = sum of all reward() points calls.
+/// Invariant 7: Leaderboard points correctly reflect win/loss (issue #24).
+/// A win still credits WIN_POINTS; a loss now costs LOSE_POINTS via
+/// penalize() (saturating at zero) instead of granting them.
 #[test]
 fn test_inv_leaderboard_points_conservation() {
     let t = setup();
@@ -4297,9 +4366,10 @@ fn test_inv_leaderboard_points_conservation() {
     t.client.claim(&bob, &id);
 
     // Alice wins: WIN_POINTS (30)
-    // Bob loses: LOSE_POINTS (10)
+    // Bob loses: penalized LOSE_POINTS (10), saturating at 0 since he had
+    // no prior points to lose.
     assert_eq!(t.leaderboard_client.get_points(&alice), 30);
-    assert_eq!(t.leaderboard_client.get_points(&bob), 10);
+    assert_eq!(t.leaderboard_client.get_points(&bob), 0);
 }
 
 /// Invariant 8: MAX_WITHDRAWAL_BPS cap is consistent with TOTAL_FEE_BPS.
@@ -4582,8 +4652,9 @@ fn test_inv_fee_split_conservation() {
 }
 
 /// Invariant 15: Reward minting per claim is bounded by token constants.
-/// WIN_TOKENS and LOSE_TOKENS are fixed; total minting per market is bounded
-/// by (WIN_TOKENS + LOSE_TOKENS) * number_of_claimants.
+/// WIN_TOKENS is fixed; a loss mints nothing (issue #24 -- LOSE_TOKENS
+/// removed, a loss costs points via penalize() instead). Total minting per
+/// market is bounded by WIN_TOKENS * number_of_winning_claimants.
 #[test]
 fn test_inv_reward_minting_bounded() {
     let t = setup();
@@ -4602,13 +4673,13 @@ fn test_inv_reward_minting_bounded() {
     t.client.claim(&alice, &id);
     t.client.claim(&bob, &id);
 
-    // Total supply = winner tokens + loser tokens (bounded by constants)
-    let expected_supply = WIN_TOKENS + LOSE_TOKENS;
+    // Total supply = winner tokens only (bounded by constants)
+    let expected_supply = WIN_TOKENS;
     assert_eq!(t.token_client.total_supply(), expected_supply);
 
     // Per-user minting matches constants exactly
     assert_eq!(t.token_client.balance(&alice), WIN_TOKENS);
-    assert_eq!(t.token_client.balance(&bob), LOSE_TOKENS);
+    assert_eq!(t.token_client.balance(&bob), 0);
 }
 
 /// Invariant 16: Referral depth vs fee caps — deep referral chains cannot
@@ -4734,18 +4805,21 @@ fn test_claim_mints_once_and_the_leaderboard_tally_matches_supply() {
     t.client.claim(&alice, &id);
     t.client.claim(&bob, &id);
 
-    // One settled bet each, one mint each.
+    // One settled bet each. Issue #24: a loss no longer mints a consolation
+    // prize (LOSE_TOKENS was removed) - only the winner's claim mints.
     assert_eq!(t.token_client.balance(&alice), WIN_TOKENS);
-    assert_eq!(t.token_client.balance(&bob), LOSE_TOKENS);
-    assert_eq!(t.token_client.total_supply(), WIN_TOKENS + LOSE_TOKENS);
+    assert_eq!(t.token_client.balance(&bob), 0);
+    assert_eq!(t.token_client.total_supply(), WIN_TOKENS);
 
-    // Points moved in step.
+    // Points moved in step: a win credits WIN_POINTS; a loss costs
+    // LOSE_POINTS via penalize(), saturating at 0 since bob had no points
+    // before this (never negative).
     assert_eq!(t.leaderboard_client.get_points(&alice), WIN_POINTS);
-    assert_eq!(t.leaderboard_client.get_points(&bob), LOSE_POINTS);
+    assert_eq!(t.leaderboard_client.get_points(&bob), 0);
 
     // And the leaderboard's tally accounts for exactly what it minted.
     assert_eq!(t.leaderboard_client.get_minted(&alice), WIN_TOKENS);
-    assert_eq!(t.leaderboard_client.get_minted(&bob), LOSE_TOKENS);
+    assert_eq!(t.leaderboard_client.get_minted(&bob), 0);
     assert_eq!(
         t.leaderboard_client.get_minted(&alice) + t.leaderboard_client.get_minted(&bob),
         t.token_client.total_supply()

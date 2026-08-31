@@ -316,6 +316,42 @@ impl LeaderboardContract {
         Self::settle_bet(&env, &user, pts, 0, is_won)
     }
 
+    // ── Issue #24: an explicit way to reduce a player's points ───────────────
+    // A loss no longer has to be point-positive. This is decay-aware (the
+    // deduction lands on the player's current, decayed score, not a stale
+    // stored one) and saturates at zero rather than underflowing. Deliberately
+    // scoped to the market contract only, mirroring reward()/add_pts() — the
+    // caller who can award points is the one trusted to take them away.
+    //
+    // Safe with respect to the top-list invariants: get_top_players and
+    // get_rank already recompute rank from live (decayed) values on every
+    // call instead of trusting stored order (see entry_points_now +
+    // selection-sort in get_top_players, and the exhaustive scan in
+    // get_rank), and recompute_min is an unconditional full scan. So a score
+    // moving down through update_top_players' existing "already listed"
+    // branch is exactly as safe as it moving up: bubble_up simply no-ops when
+    // the entry no longer beats its predecessor, and the cached min is
+    // recomputed correctly regardless of direction. A penalized player who
+    // isn't currently ranked never touches the top list at all — see
+    // debit_points — so a penalty can never insert an unranked player into
+    // the leaderboard or bump a ranked one out on their behalf.
+    pub fn penalize(
+        env: Env,
+        caller: Address,
+        user: Address,
+        pts: u64,
+    ) -> Result<(), LeaderboardError> {
+        Self::require_not_paused(&env)?;
+        Self::require_market_contract(&env, &caller)?;
+        caller.require_auth();
+        if pts == 0 {
+            return Err(LeaderboardError::InvalidPoints);
+        }
+        Self::require_not_banned(&env, &user)?;
+        Self::debit_points(&env, &user, pts);
+        Ok(())
+    }
+
     // ── Pull-based reward flow (issue #86) ───────────────────────────────────
 
     /// Queue a settled-bet reward for later claim. A banned player is rejected
@@ -453,8 +489,6 @@ impl LeaderboardContract {
         Ok(())
     }
 
-    /// No-op stub retained for ABI compatibility. total_bets is derived at read
-    /// time, so a standalone "bet recorded" call does nothing.
     /// No-op stub retained for ABI compatibility. total_bets is derived at read
     /// time, so a standalone "bet recorded" call does nothing.
     pub fn record_bet(env: Env, caller: Address, _user: Address) -> Result<(), LeaderboardError> {
@@ -1055,6 +1089,31 @@ impl LeaderboardContract {
         );
     }
 
+    /// Reduce a player's (decay-forwarded) points by `pts`, saturating at
+    /// zero. Deliberately does not touch won_bets/lost_bets/bonus_bets —
+    /// those are activity counters, not points, and the loss itself is
+    /// already recorded by whichever add_pts/reward call reported it.
+    ///
+    /// Only reconciles the top list if the player is currently ranked. An
+    /// unranked player's Stats just get a lower number; penalizing them must
+    /// never be the reason they newly appear in (or displace someone from)
+    /// the top list, so upsert_top is skipped entirely when they aren't
+    /// already in it — mirroring how a penalty can't create rank, only
+    /// remove it.
+    fn debit_points(env: &Env, user: &Address, pts: u64) {
+        let mut s = Self::stats_for_update(env, user);
+        s.points = s.points.saturating_sub(pts);
+        Self::commit_stats(env, user, &s);
+        if Self::top_slot_entry(env, user).is_some() {
+            Self::upsert_top(env, user.clone(), s.points);
+        }
+        env.storage().instance().extend_ttl(TTL_BUMP, TTL_HIGH);
+        env.events().publish(
+            (Symbol::new(env, "leaderboard_penalized"), user.clone()),
+            s.points,
+        );
+    }
+
     fn accumulate_pending(
         env: &Env,
         user: &Address,
@@ -1367,6 +1426,58 @@ impl LeaderboardContract {
         Self::save_ordered_entries(env, &entries);
     }
 
+    /// Repositions an *existing* top-list entry (already written to `slot`)
+    /// to its correct sorted position, in whichever direction its updated
+    /// points now require.
+    ///
+    /// bubble_up alone is one-directional (walks toward index 0 only) and is
+    /// correct for its two callers in upsert_top's Path B/C: a brand-new
+    /// entry always starts at the tail (Path B) or at the position of the
+    /// weakest existing entry (Path C), so by construction it can only ever
+    /// need to move earlier, never later. penalize()/debit_points broke that
+    /// assumption: an already-ranked entry can have its points *reduced*, in
+    /// which case it may need to move later instead — a case bubble_up
+    /// silently no-ops on (its backward-only loop simply never fires), which
+    /// would leave the entry's raised-or-lowered value written in place but
+    /// the top list's physical slot order stale relative to it.
+    fn resettle_entry(env: &Env, entry: &PlayerEntry, slot: u32) {
+        let mut entries = Self::ordered_entries(env);
+        if slot >= entries.len() {
+            return;
+        }
+        entries.set(slot, entry.clone());
+        let points = Self::entry_points_now(env, entry);
+
+        // Try moving earlier first (same rule as bubble_up).
+        let mut target = slot;
+        while target > 0 {
+            let previous = entries.get(target - 1).unwrap();
+            if Self::entry_points_now(env, &previous) >= points {
+                break;
+            }
+            target -= 1;
+        }
+        // Only one direction can ever apply to a previously-sorted list, so
+        // only try moving later if moving earlier didn't already fire.
+        if target == slot {
+            let len = entries.len();
+            while target + 1 < len {
+                let next = entries.get(target + 1).unwrap();
+                if Self::entry_points_now(env, &next) <= points {
+                    break;
+                }
+                target += 1;
+            }
+        }
+
+        if target != slot {
+            let moved = entries.get(slot).unwrap();
+            entries.remove(slot);
+            entries.insert(target, moved);
+        }
+        Self::save_ordered_entries(env, &entries);
+    }
+
     // ── Migration (issue #61) ──────────────────────────────────────────────────
 
     /// Ensure legacy unsorted storage from pre-upgrade deployments is migrated
@@ -1450,10 +1561,10 @@ impl LeaderboardContract {
         if let Some((slot, mut entry)) = Self::top_slot_entry(env, &user) {
             entry.points = new_points;
             entry.epoch = Self::current_epoch(env);
-            // Write the updated entry in place, then shift it up if needed.
-            // bubble_up re-writes the slot only if it actually moves.
+            // Write the updated entry in place, then re-sort it into position.
+            // resettle_entry re-writes the slot only if it actually moves.
             Self::set_top_slot(env, slot, &entry); // 2 writes
-            Self::bubble_up(env, &entry, slot);
+            Self::resettle_entry(env, &entry, slot);
             Self::recompute_min(env); // 2 instance writes (not persistent)
             return;
         }
@@ -1525,6 +1636,8 @@ impl LeaderboardContract {
 mod admin_tests;
 #[cfg(test)]
 mod decay_tests;
+#[cfg(test)]
+mod penalty_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

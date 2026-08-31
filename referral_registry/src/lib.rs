@@ -253,8 +253,12 @@ impl ReferralRegistryContract {
         Self::require_market_contract(&env, &caller)?;
         caller.require_auth();
 
-        // See get_referrer for why this needs the Option<Address> type
-        // annotation plus a flatten(), not a bare Address read.
+        // The stored value at this key is itself an Option<Address> (see
+        // register_referral's `.set(&key, &referrer)`), so a correct read is
+        // Option<Option<Address>>: outer None means "never registered",
+        // Some(None) means "registered with no referrer". Both collapse to
+        // "no referrer" here, via flatten() -- same double-Option shape
+        // referral_depth and get_referrer already read correctly.
         let referrer: Option<Address> = env
             .storage()
             .persistent()
@@ -303,6 +307,8 @@ impl ReferralRegistryContract {
     }
 
     pub fn get_referrer(env: Env, user: Address) -> Option<Address> {
+        // Same double-Option shape as credit()'s read above -- see its
+        // comment for why flatten() (not a bare .get()) is required here.
         let key = DataKey::Referrer(user);
         let val: Option<Address> = env
             .storage()
