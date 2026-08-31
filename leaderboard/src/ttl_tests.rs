@@ -172,8 +172,11 @@ fn test_min_points_and_min_slot_survive_ttl_refresh_cycle() {
         newcomer,
         "a fresh score must lead a list of decayed incumbents"
     );
+    // Page reads are bounded by MAX_PAGE_SIZE (issue #68), so fetch the
+    // weakest slot on its own page instead of one 50-wide read.
+    let tail = client.get_top_players(&(MAX_TOP_PLAYERS - 1), &1);
     assert_eq!(
-        top.get(MAX_TOP_PLAYERS - 1).unwrap().points,
+        tail.get(0).unwrap().points,
         client.get_min_points(),
         "min cache must agree with the weakest ranked entry"
     );
