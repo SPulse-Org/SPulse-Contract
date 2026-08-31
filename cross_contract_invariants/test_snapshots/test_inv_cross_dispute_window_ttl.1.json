@@ -743,33 +743,6 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "Balance"
-                  },
-                  {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "i128": "20000000"
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6307302
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "key": {
-                "vec": [
-                  {
                     "symbol": "MinterIndex"
                   },
                   {
@@ -970,7 +943,7 @@
                         ]
                       },
                       "val": {
-                        "i128": "20000000"
+                        "i128": "0"
                       }
                     }
                   ]
@@ -1023,7 +996,7 @@
                       "symbol": "points"
                     },
                     "val": {
-                      "u64": "10"
+                      "u64": "0"
                     }
                   },
                   {
@@ -1228,7 +1201,7 @@
                         ]
                       },
                       "val": {
-                        "bytes": "0000001000000001000000010000001100000001000000040000000f000000076164647265737300000000120000000100000000000000000000000000000000000000000000000000000000000000070000000f0000000565706f636800000000000003000000000000000f00000006706f696e7473000000000005000000000000000a0000000f0000000373657100000000050000000000000000"
+                        "bytes": "0000001000000001000000010000001100000001000000040000000f000000076164647265737300000000120000000100000000000000000000000000000000000000000000000000000000000000070000000f0000000565706f636800000000000003000000000000000f00000006706f696e747300000000000500000000000000000000000f0000000373657100000000050000000000000000"
                       }
                     },
                     {
@@ -2344,7 +2317,7 @@
             "data": {
               "vec": [
                 {
-                  "u64": "10"
+                  "u64": "0"
                 },
                 {
                   "u32": 0
@@ -2362,23 +2335,20 @@
     {
       "event": {
         "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
         "type_": "contract",
         "body": {
           "v0": {
             "topics": [
               {
-                "symbol": "mint"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                "symbol": "leaderboard_penalized"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
               }
             ],
             "data": {
-              "i128": "20000000"
+              "u64": "0"
             }
           }
         }

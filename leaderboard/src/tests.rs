@@ -1578,7 +1578,7 @@ fn setup_with_token() -> (
     // mint PULSE — reward()/reward_bonus() call token_client.mint() with the
     // leaderboard contract as the minter, which pulse_token rejects unless
     // it's on the authorized-minter list.
-    client.set_token_contract(&admin, &token_id, &1_u32);
+    client.set_token_contract(&admin, &token_id, &pulse_token::INTERFACE_VERSION);
     token_client.set_minter(&contract_id);
 
     (env, client, admin, market, referral, token_client)

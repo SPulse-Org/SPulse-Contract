@@ -54,19 +54,23 @@ fn setup() -> TestSetup {
         &7u32,
     );
 
-    // Register both contracts before initializing either: leaderboard.
-    // initialize() takes referral_registry's address and vice versa, so
-    // both IDs must exist first -- there's no setter to fix up
-    // leaderboard's ReferralContract after the fact.
+    // Register both contracts before initializing either one: leaderboard's
+    // initialize() needs referral_registry's address (so it can recognize
+    // register_referral()'s reward_bonus calls as coming from the real
+    // referral contract, not an impostor), and referral_registry's
+    // initialize() needs leaderboard's address right back. `env.register`
+    // only deploys and returns an address -- it doesn't run `initialize` --
+    // so both addresses are available up front regardless of call order.
     let leaderboard_id = env.register(LeaderboardContract, ());
     let leaderboard_client = leaderboard::LeaderboardContractClient::new(&env, &leaderboard_id);
+
     let referral_id = env.register(ReferralRegistryContract, ());
     let client = ReferralRegistryContractClient::new(&env, &referral_id);
 
     leaderboard_client.initialize(&admin, &market, &referral_id);
     client.initialize(&admin, &market, &token_id, &leaderboard_id, &xlm_sac_id);
 
-    leaderboard_client.set_token_contract(&admin, &token_id, &1_u32);
+    leaderboard_client.set_token_contract(&admin, &token_id, &pulse_token::INTERFACE_VERSION);
     token_client.set_minter(&leaderboard_id);
     token_client.set_minter(&referral_id);
     token_client.set_minter(&market);
@@ -182,25 +186,35 @@ fn test_credit_without_referrer_returns_to_bettor() {
     assert_eq!(t.xlm.balance(&user), user_balance_before + referral_fee);
 }
 
+// Renamed from the original "late referrer registration" test, which
+// asserted a scenario the contract doesn't actually support: it registered
+// `user` with no referrer, then registered `referrer` afterward and expected
+// a second credit() to suddenly start paying them -- but a user's referrer
+// is fixed at their own registration time (see register_referral's
+// AlreadyRegistered guard) and never retroactively linked. What "a referrer
+// that's late" actually means here is a referrer address cited *before* it
+// has registered itself, which register_referral's InvalidReferrer check
+// exists specifically to reject -- and which had no test coverage at all.
 #[test]
-fn test_credit_after_late_referrer_registration() {
+fn test_register_referral_rejects_unregistered_referrer() {
     let t = setup();
     let referrer = Address::generate(&t.env);
     let user = Address::generate(&t.env);
 
-    t.client.register_referral(
+    // `referrer` has never called register_referral, so it has no Referrer
+    // entry of its own yet -- citing it must fail, not silently succeed.
+    let result = t.client.try_register_referral(
         &user,
         &String::from_str(&t.env, "User"),
-        &Option::<Address>::None,
+        &Some(referrer.clone()),
     );
+    assert!(
+        result.is_err(),
+        "registering with an unregistered referrer must be rejected"
+    );
+    assert_eq!(t.client.get_referrer(&user), None);
 
-    let referral_fee = 5_0000000_i128;
-    let user_balance_before = t.xlm.balance(&user);
-
-    let paid = t.client.credit(&t.market, &user, &referral_fee);
-    assert_eq!(paid, false);
-    assert_eq!(t.xlm.balance(&user), user_balance_before + referral_fee);
-
+    // Once the referrer legitimately registers first, the same call succeeds.
     t.client.register_referral(
         &referrer,
         &String::from_str(&t.env, "Referrer"),
@@ -215,14 +229,7 @@ fn test_credit_after_late_referrer_registration() {
         &String::from_str(&t.env, "User"),
         &Some(referrer.clone()),
     );
-
-    let referrer_balance_before = t.xlm.balance(&referrer);
-    let paid = t.client.credit(&t.market, &user, &referral_fee);
-    assert_eq!(paid, true);
-    assert_eq!(
-        t.xlm.balance(&referrer),
-        referrer_balance_before + referral_fee
-    );
+    assert_eq!(t.client.get_referrer(&user), Some(referrer));
 }
 
 #[test]
@@ -288,25 +295,30 @@ fn test_referral_depth_limit() {
         &Option::<Address>::None,
     );
 
+    // referral_depth(ref_addr) counts hops from ref_addr back to the chain
+    // root: users[0] (no referrer) sits at depth 0, and each subsequent
+    // registration in this chain is one hop deeper, so users[k] sits at
+    // depth == k. register_referral rejects a new registration once its
+    // cited referrer's depth + 1 >= MAX_REFERRAL_DEPTH. At loop iteration i,
+    // the referrer is users[i-1], at depth i-1, so the check becomes
+    // i >= MAX_REFERRAL_DEPTH -- i.e. rejection first fires exactly at
+    // i == max_depth (the max_depth-th registration), not one hop later.
     for i in 1..=max_depth {
         let referrer = users.get((i - 1) as u32).unwrap();
         let user = users.get(i as u32).unwrap();
-        let result = if i == max_depth {
-            t.client.try_register_referral(
+        if i == max_depth {
+            let result = t.client.try_register_referral(
                 &user,
                 &String::from_str(&t.env, "U"),
                 &Some(referrer.clone()),
-            )
+            );
+            assert!(result.is_err(), "should fail at depth limit");
         } else {
             t.client.register_referral(
                 &user,
                 &String::from_str(&t.env, "U"),
                 &Some(referrer.clone()),
             );
-            Ok(Ok(()))
-        };
-        if i == max_depth {
-            assert!(result.is_err(), "should fail at depth limit");
         }
     }
 }

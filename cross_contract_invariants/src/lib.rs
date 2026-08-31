@@ -85,7 +85,7 @@ fn cross_setup() -> CrossContractSetup {
     leaderboard.initialize(&admin, &market_id, &referral_id);
     referral.initialize(&admin, &market_id, &token_id, &leaderboard_id, &xlm_sac_id);
 
-    leaderboard.set_token_contract(&admin, &token_id, &1_u32);
+    leaderboard.set_token_contract(&admin, &token_id, &pulse_token::INTERFACE_VERSION);
     token.set_minter(&leaderboard_id);
     token.set_minter(&market_id);
     token.set_minter(&referral_id);
@@ -238,8 +238,9 @@ fn test_inv_cross_late_referrer_registration() {
 }
 
 /// Invariant 4: PULSE minting bounded by constants
-/// Tests that total PULSE minted matches WIN_TOKENS + LOSE_TOKENS
-/// after a full market lifecycle (cross-contract: prediction_market -> leaderboard -> pulse_token)
+/// Tests that total PULSE minted matches WIN_TOKENS after a full market
+/// lifecycle (cross-contract: prediction_market -> leaderboard -> pulse_token).
+/// A loss no longer mints a LOSE_TOKENS consolation prize (issue #24).
 #[test]
 fn test_inv_cross_pulse_minting_bounded() {
     let t = cross_setup();
@@ -261,9 +262,9 @@ fn test_inv_cross_pulse_minting_bounded() {
     t.market.claim(&alice, &market_id);
     t.market.claim(&bob, &market_id);
 
-    assert_eq!(t.token.total_supply(), 12_0000000);
+    assert_eq!(t.token.total_supply(), 10_0000000);
     assert_eq!(t.token.balance(&alice), 10_0000000);
-    assert_eq!(t.token.balance(&bob), 2_0000000);
+    assert_eq!(t.token.balance(&bob), 0);
 }
 
 /// Invariant 5: Leaderboard points conservation
@@ -290,8 +291,9 @@ fn test_inv_cross_leaderboard_points() {
     t.market.claim(&alice, &market_id);
     t.market.claim(&bob, &market_id);
 
+    // Bob loses: penalized LOSE_POINTS, saturating at 0 (issue #24).
     assert_eq!(t.leaderboard.get_points(&alice), 30);
-    assert_eq!(t.leaderboard.get_points(&bob), 10);
+    assert_eq!(t.leaderboard.get_points(&bob), 0);
 }
 
 /// Invariant 6: Withdraw cap prevents draining

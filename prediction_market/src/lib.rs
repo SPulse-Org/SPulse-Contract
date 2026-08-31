@@ -67,7 +67,13 @@ pub const NET_NUMERATOR: i128 = 9_800;
 const WIN_POINTS: u64 = 30;
 const LOSE_POINTS: u64 = 10;
 const WIN_TOKENS: i128 = 10_0000000;
-const LOSE_TOKENS: i128 = 2_0000000;
+// Issue #24: a loss now actually costs LOSE_POINTS (via leaderboard::penalize)
+// instead of awarding them, so there is no longer a LOSE_TOKENS consolation
+// mint to go with it — a real penalty and a reward for the same event are
+// contradictory. If a maintainer wants to reinstate a token consolation
+// prize for losers, it needs its own explicit call (penalize() deliberately
+// carries no token parameter — see leaderboard's penalty_tests.rs), not a
+// silent revival of this constant.
 
 // Withdrawal safety (issue #12): a single payout is capped and the non-admin
 // path is timelocked, so a compromised fee recipient cannot drain the whole
@@ -558,6 +564,10 @@ impl PredictionMarketContract {
             .instance()
             .set(&DataKey::PinnedHashes, &pending.hashes);
         env.storage().instance().remove(&DataKey::PendingConfig);
+        // cfg_act: the original activation event. Previously this call site
+        // instead had a merge-corrupted duplicate publish referencing
+        // `admin`/`token_contract`/`referral_contract`/`leaderboard_contract`
+        // /`xlm_sac` — none of which are in scope in this function; removed.
         env.events().publish(
             (Symbol::new(&env, "cfg_act"), caller.clone()),
             pending.cfg.clone(),
@@ -1653,28 +1663,55 @@ impl PredictionMarketContract {
         }
 
         let real_win = is_winner && winning_side > 0;
-        let (points, tokens): (u64, i128) = if real_win {
-            (WIN_POINTS, WIN_TOKENS)
-        } else {
-            (LOSE_POINTS, LOSE_TOKENS)
-        };
 
         // Immediate reward settlement (issue #139): add_pts is deprecated in
         // favor of reward(), which credits points/win-loss and mints the
         // PULSE reward in one cross-contract hop.
         Self::require_compatible_leaderboard(&env, &cfg.leaderboard)?;
-        let _: Val = env.invoke_contract(
-            &cfg.leaderboard,
-            &Symbol::new(&env, "reward"),
-            vec![
-                &env,
-                this.clone().into_val(&env),
-                user.clone().into_val(&env),
-                points.into_val(&env),
-                tokens.into_val(&env),
-                real_win.into_val(&env),
-            ],
-        );
+        if real_win {
+            let _: Val = env.invoke_contract(
+                &cfg.leaderboard,
+                &Symbol::new(&env, "reward"),
+                vec![
+                    &env,
+                    this.clone().into_val(&env),
+                    user.clone().into_val(&env),
+                    WIN_POINTS.into_val(&env),
+                    WIN_TOKENS.into_val(&env),
+                    true.into_val(&env),
+                ],
+            );
+        } else {
+            // Issue #24: a loss must actually cost the player rating, not add
+            // to it. Two calls, not one, because leaderboard::penalize() is
+            // deliberately activity-counter-neutral (see its doc comment and
+            // leaderboard/src/penalty_tests.rs::test_penalize_does_not_touch_activity_counters)
+            // so it composes safely with whatever call already recorded the
+            // event -- exactly this one. add_pts(..., 0, false) is the same
+            // "record a loss with no points" call every other loss path
+            // already used before this fix; only the points side changes.
+            let _: Val = env.invoke_contract(
+                &cfg.leaderboard,
+                &Symbol::new(&env, "add_pts"),
+                vec![
+                    &env,
+                    this.clone().into_val(&env),
+                    user.clone().into_val(&env),
+                    0_u64.into_val(&env),
+                    false.into_val(&env),
+                ],
+            );
+            let _: Val = env.invoke_contract(
+                &cfg.leaderboard,
+                &Symbol::new(&env, "penalize"),
+                vec![
+                    &env,
+                    this.clone().into_val(&env),
+                    user.clone().into_val(&env),
+                    LOSE_POINTS.into_val(&env),
+                ],
+            );
+        }
 
         env.events().publish(
             (Symbol::new(&env, "claim_processed"), user, market_id),
